@@ -2,13 +2,16 @@ import Foundation
 
 final class FixtureProtocol: URLProtocol {
     static var handler: ((URLRequest) throws -> [String: Any])!
+    static var status = 200
+    static var rawHandler: ((URLRequest) throws -> Data)?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         do {
-            let object = try Self.handler(request)
-            let data = try JSONSerialization.data(withJSONObject: object)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            let data: Data
+            if let raw = Self.rawHandler { data = try raw(request) }
+            else { data = try JSONSerialization.data(withJSONObject: Self.handler(request)) }
+            let response = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: data); client?.urlProtocolDidFinishLoading(self)
         } catch { client?.urlProtocol(self, didFailWithError: error) }
@@ -19,7 +22,7 @@ final class FixtureProtocol: URLProtocol {
 @main struct ProviderTests {
     static var checks = 0
     static func check(_ condition: @autoclosure () -> Bool, _ message: String) { precondition(condition(), message); checks += 1 }
-    static func jsonBody(_ request: URLRequest) -> [String: Any] {
+    static func bodyData(_ request: URLRequest) -> Data {
         var data = request.httpBody
         if data == nil, let stream = request.httpBodyStream {
             stream.open(); defer { stream.close() }
@@ -27,8 +30,14 @@ final class FixtureProtocol: URLProtocol {
             while stream.hasBytesAvailable { let count = stream.read(&buffer, maxLength: buffer.count); if count <= 0 { break }; collected.append(contentsOf: buffer.prefix(count)) }
             data = collected
         }
-        guard let data else { return [:] }
-        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+        return data ?? Data()
+    }
+    static func jsonBody(_ request: URLRequest) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: bodyData(request)) as? [String: Any]) ?? [:]
+    }
+    static func formBody(_ request: URLRequest) -> [String: String] {
+        let text = String(decoding: bodyData(request), as: UTF8.self)
+        return Dictionary((URLComponents(string: "https://example.invalid/?" + text)?.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { _, new in new })
     }
     @MainActor static func driver(_ disk: Disk) -> DirectDrive {
         var account = DriveAccount(); account.cookie = "fixture=local"; account.accessToken = "fixture-access"
@@ -102,6 +111,45 @@ final class FixtureProtocol: URLProtocol {
         let xunleiResult = try await driver(.xunlei).transfer(xunlei) { _ in }
         check(xunleiResult.code == "1234", "Xunlei returns generated extraction code")
         check(Set(xunleiShareIDs) == Set(["n1", "n2"]), "Xunlei shares all restored items")
+        // A protected Baidu share carries its own uk, and the first page is
+        // embedded in locals.mset. A stale listing call used to return -9.
+        let html = #"<script>var currentUser={"uk":999};locals.mset({"shareid":123,"uk":456,"file_list":{"list":[{"fs_id":101,"server_filename":"资源一"},{"fs_id":102,"server_filename":"资源二"}]}});</script>"#
+        let parsed = BaiduSharePage.decode(html)
+        check(parsed.owner == "456", "Share owner is not signed-in user's uk")
+        check(parsed.files.count == 2, "Use embedded top-level share files")
+        var verifiedCode = ""; var transferredIDs = ""; var sentKey = ""; var listed = false
+        FixtureProtocol.rawHandler = { request in
+            let path = request.url!.path
+            var result: [String: Any] = ["errno": 0]
+            switch path {
+            case "/api/gettemplatevariable": result["result"] = ["bdstoken": "token"]
+            case "/share/verify": verifiedCode = formBody(request)["pwd"] ?? ""; result["randsk"] = "key%2Bprotected%3D"
+            case "/s/1fixture": return Data(html.utf8)
+            case "/share/list": listed = true
+            case "/api/create": result["errno"] = 4
+            case "/share/transfer":
+                let form = formBody(request); transferredIDs = form["fsidlist"] ?? ""; sentKey = form["sekey"] ?? ""
+                result["extra"] = ["list": [["to_fs_id": 201], ["to_fs_id": 202]]]
+            case "/share/set":
+                check(formBody(request)["fid_list"] == "[201,202]", "Baidu shares the saved identifiers")
+                result["link"] = "https://pan.baidu.com/s/1fixture-new"
+            default: preconditionFailure("Unexpected Baidu request " + path)
+            }
+            return try JSONSerialization.data(withJSONObject: result)
+        }
+        let protectedBaidu = ShareText.parse("https://pan.baidu.com/s/1fixture?pwd=igfg")[0]
+        _ = try await driver(.baidu).transfer(protectedBaidu) { _ in }
+        check(verifiedCode == "igfg", "Preserve original four-character extraction code")
+        check(transferredIDs == "[101,102]", "Transfer every top-level file")
+        check(sentKey == "key+protected=", "Pass once-decoded sekey through form encoding")
+        check(!listed, "Avoid redundant share/list for embedded first page")
+        FixtureProtocol.rawHandler = nil
+        FixtureProtocol.status = 400
+        FixtureProtocol.handler = { _ in ["error": "captcha_invalid", "error_description": "verification expired"] }
+        let http = driver(.xunlei).http
+        do { _ = try await http.json("https://api-pan.xunlei.com/drive/v1/share"); preconditionFailure("Expected HTTP error") }
+        catch { check(error.localizedDescription.contains("verification expired"), "Keep actual HTTP error detail") }
+        http.close(); FixtureProtocol.status = 200
         print("PASS: \(checks) provider fixture checks; no real accounts or network")
     }
 }

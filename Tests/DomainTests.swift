@@ -36,6 +36,12 @@ import Foundation
         check(protected.restore(protected.text) == sample, "Restore original URL and code exactly")
         check(protected.restore("missing all markers") == nil, "Reject dropped markers")
         check(protected.restore(protected.text + protected.replacements[0].marker) == nil, "Reject repeated marker")
+        let mixed = "夸克：https://pan.quark.cn/s/9cf83d7b7c4e标题\n迅雷：https://pan.xunlei.com/s/fixture?pwd=jqnr#\n百度：https://pan.baidu.com/s/1fixture?pwd=igfg"
+        let all = ShareText.parse(mixed)
+        check(all.count == 3, "Recognize URLs adjacent to Chinese text")
+        check(all.first { $0.disk == .xunlei }?.originalURL.hasSuffix("#") == false, "Strip inert trailing fragment")
+        check(all.first { $0.disk == .xunlei }?.code == "jqnr", "Fragment does not contaminate extraction code")
+        check(ShareText.parse("https://pan.quark.cn/s/abc?pwd=1234\n提取码：1234").count == 1, "Multiline extraction code")
         print("PASS: \(count) domain regression checks")
     }
 }

@@ -37,7 +37,7 @@ struct Workspace: View {
         }
         .tint(FlowStyle.accent)
         .sheet(item: $accountDisk) { disk in AccountSettings(disk: disk) { model.refreshAccounts() } }
-        .sheet(item: $openedJob) { job in DriveLogin(disk: job.disk, url: URL(string: job.originalURL)) { model.refreshAccounts() } }
+        .fullScreenCover(item: $openedJob) { job in DriveLogin(disk: job.disk, url: URL(string: job.originalURL)) { model.refreshAccounts() } }
         .sheet(item: $importing) { job in ImportShare(job: job) { model.importResult($0, for: job) } }
         .alert("已在网盘核对？", isPresented: Binding(get: { resetJob != nil }, set: { if !$0 { resetJob = nil } })) {
             Button("取消", role: .cancel) { resetJob = nil }
@@ -83,8 +83,8 @@ struct Workspace: View {
                     Button { model.identify() } label: { Label("识别链接", systemImage: "viewfinder") }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            HStack { section("待转存", subtitle: "同平台转存到自己的账号"); Spacer(); Text("\(model.pending.count)").font(.title3.monospacedDigit().bold()).foregroundStyle(FlowStyle.accent) }
-            if model.pending.isEmpty { empty("还没有待转存链接", detail: "粘贴素材，开始你的第一条内容流。", symbol: "tray") }
+            HStack { section("本次识别", subtitle: "成功记录也保留显示，避免重复转存"); Spacer(); Text("\(model.importedJobs.count)").font(.title3.monospacedDigit().bold()).foregroundStyle(FlowStyle.accent) }
+            if model.importedJobs.isEmpty { empty("还没有识别链接", detail: "粘贴素材，开始你的第一条内容流。", symbol: "tray") }
             else {
                 HStack {
                     Button("全选") { model.selectAll(true) }
@@ -92,7 +92,7 @@ struct Workspace: View {
                     Button("取消全选") { model.selectAll(false) }
                     Spacer(); Text("已选 \(model.selected.count)").font(.caption).foregroundStyle(FlowStyle.muted)
                 }.font(.subheadline).frame(minHeight: 44)
-                ForEach(model.pending) { job in taskCard(job, compact: true).transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .bottom))) }
+                ForEach(model.importedJobs) { job in taskCard(job, compact: job.status != .done).transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .bottom))) }
             }
             notice(model.notice)
             if model.running {
@@ -201,14 +201,14 @@ struct Workspace: View {
                     editor("原文", text: $model.original, height: 230, prompt: "粘贴要改写的原文与分享链接…")
                     Button("导入工作台素材") { model.original = model.source }.buttonStyle(FlowButtonStyle(primary: false))
                 } else if copyStage == "改写稿" { editor("改写稿", text: $model.draft, height: 260, prompt: "生成后的文案显示在这里，可继续编辑。") }
-                else { editor("发布稿", text: $model.output, height: 260, prompt: "替换成功链接后，复制发布稿。") }
+                else { editor("发布稿", text: $model.output, height: 260, prompt: "成功转存后自动更新发布稿。") }
             }
             FlowCard {
                 section("改写偏好", subtitle: model.modelID.isEmpty ? "请先在设置中连接模型" : "当前模型 · " + model.modelID)
                 Picker("文案语气", selection: $model.tone) { ForEach(["自然分享", "简洁直给", "内容推荐"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
                 if !model.models.isEmpty { Picker("选择模型", selection: $model.modelID) { ForEach(model.models, id: \.self) { Text($0) } }.tint(FlowStyle.accent) }
-                Button { model.rewrite(); copyStage = "改写稿" } label: { HStack { if model.rewriting { ProgressView() }; Label(model.rewriting ? "正在生成文案" : "AI 改写文案", systemImage: "sparkles"); Spacer() } }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.rewriting || model.original.isEmpty)
-                Button { model.replaceLinks(); copyStage = "发布稿" } label: { Label("替换为我的分享链接", systemImage: "link") }.buttonStyle(FlowButtonStyle(primary: false)).disabled(model.original.isEmpty && model.draft.isEmpty)
+                Button { model.rewrite(); copyStage = "发布稿" } label: { HStack { if model.rewriting { ProgressView() }; Label(model.rewriting ? "正在生成文案" : "AI 改写文案", systemImage: "sparkles"); Spacer() } }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.rewriting || model.original.isEmpty)
+                Label("转存成功后自动换成你的链接", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(FlowStyle.success)
             }
             notice(model.copyNotice)
             Button { UIPasteboard.general.string = model.output; model.copyNotice = "发布稿已复制。" } label: { HStack { Label("复制发布稿", systemImage: "doc.on.doc"); Spacer(); Image(systemName: "arrow.up.right") } }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.output.isEmpty)
@@ -232,7 +232,7 @@ struct Workspace: View {
                 Label("你的内容，留在你的手机", systemImage: "lock.shield").font(.subheadline.bold())
                 Text("账号凭证保存在系统钥匙串。任务与草稿保存在本机；调用 AI 时才将文案发送给你配置的中转站。").font(.caption).foregroundStyle(FlowStyle.muted).lineSpacing(5)
             }
-            Text("CloudFlow 0.3.0 · PHONE FIRST").font(.caption2.monospaced()).foregroundStyle(FlowStyle.muted).frame(maxWidth: .infinity).padding(.top, 8)
+            Text("CloudFlow 0.3.1 · PHONE FIRST").font(.caption2.monospaced()).foregroundStyle(FlowStyle.muted).frame(maxWidth: .infinity).padding(.top, 8)
         }
     }
     private func labeledField(_ title: String, prompt: String, text: Binding<String>) -> some View {

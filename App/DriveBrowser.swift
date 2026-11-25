@@ -4,6 +4,8 @@ import WebKit
 @MainActor final class LoginSession: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     @Published var notice = "完成网页登录后，点右上角保存并验证。"
     @Published var busy = false
+    @Published var desktopMode = false
+    @Published var zoom: Double = 1
     let disk: Disk
     let webView: WKWebView
     private var observedHeaders: [String: String] = [:]
@@ -11,6 +13,8 @@ import WebKit
         self.disk = disk
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
+        configuration.defaultWebpagePreferences.preferredContentMode = .mobile
+        configuration.userContentController.addUserScript(WKUserScript(source: Self.mobileLayout, injectionTime: .atDocumentEnd, forMainFrameOnly: false))
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         webView.navigationDelegate = self; webView.uiDelegate = self
@@ -19,10 +23,41 @@ import WebKit
             controller.add(WeakLoginHandler(self), name: "cloudflowSession")
             controller.addUserScript(WKUserScript(source: Self.sessionObserver, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+        webView.scrollView.bouncesZoom = true
+        webView.scrollView.showsHorizontalScrollIndicator = true
+        webView.scrollView.showsVerticalScrollIndicator = true
         webView.allowsBackForwardNavigationGestures = true
         webView.load(URLRequest(url: url ?? disk.homeURL))
     }
+    private static let mobileLayout = #"""
+    (() => {
+      const host = location.hostname;
+      if (!['xunlei.com','baidu.com','quark.cn'].some(domain => host === domain || host.endsWith('.' + domain))) return;
+      let meta = document.querySelector('meta[name="viewport"]');
+      if (!meta) { meta = document.createElement('meta'); meta.name = 'viewport'; document.head.appendChild(meta); }
+      meta.content = 'width=device-width,initial-scale=1,minimum-scale=0.25,maximum-scale=5,user-scalable=yes,viewport-fit=cover';
+      const style = document.createElement('style');
+      style.id = 'cloudflow-mobile-login';
+      style.textContent = 'html,body{min-width:0!important;-webkit-text-size-adjust:100%} @media(max-width:600px){[role="dialog"],.login-dialog,.login-modal,.login-panel,.login-container,.el-dialog,.ant-modal,.universal-login-container{box-sizing:border-box!important;max-width:calc(100vw - 16px)!important} [role="dialog"],.login-dialog,.login-modal,.el-dialog,.ant-modal{max-height:calc(100dvh - 16px)!important;overflow:auto!important} iframe[src*="xunlei"],iframe[src*="passport.baidu"],iframe[src*="quark"]{max-width:calc(100vw - 16px)!important} input{font-size:max(16px,1em)}}';
+      document.head.appendChild(style);
+    })()
+    """#
+    func setDesktop(_ value: Bool) {
+        desktopMode = value; zoom = 1; webView.pageZoom = 1
+        webView.customUserAgent = value ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15" : nil
+        webView.configuration.defaultWebpagePreferences.preferredContentMode = value ? .desktop : .mobile
+        webView.reload()
+    }
+    func changeZoom(_ delta: Double) { zoom = min(2, max(0.3, zoom + delta)); webView.pageZoom = zoom }
+    func fitScreen() {
+        Task {
+            let script = "Math.max(document.documentElement.scrollWidth,document.body ? document.body.scrollWidth : 0,window.innerWidth)"
+            if let width = try? await webView.evaluateJavaScript(script) as? Double, width > 0 {
+                zoom = min(1, max(0.3, Double(webView.bounds.width) / width)); webView.pageZoom = zoom
+            }
+        }
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { if desktopMode { fitScreen() } }
     // The login page owns the session. Observe only its requests to the drive API,
     // retain the known session headers in memory, and persist only on explicit Save.
     private static let sessionObserver = #"""
@@ -72,7 +107,11 @@ import WebKit
         busy = true; defer { busy = false }
         var account = DriveAccount.read(disk)
         let cookies = await DriveWebData.cookies(for: disk)
-        if !cookies.isEmpty { account.cookie = cookies.map { $0.name + "=" + $0.value }.joined(separator: "; ") }
+        if !cookies.isEmpty {
+            account.cookie = cookies.map { $0.name + "=" + $0.value }.joined(separator: "; ")
+            account.scopedCookies = cookies.map(StoredDriveCookie.init)
+        }
+        if disk == .xunlei { account.usesWebsiteSession = true }
         if disk == .xunlei, let host = webView.url?.host, host == "xunlei.com" || host.hasSuffix(".xunlei.com") {
             // Only session fields are read, following the user's explicit Save action.
             let script = #"""
@@ -114,6 +153,7 @@ import WebKit
         do {
             guard account.configured else { throw ServiceError("尚未读取到登录会话，请完成网页登录后重试。") }
             account.verifiedAt = nil; try account.save(disk)
+            if disk == .xunlei { XunleiWebClient.shared.reset() }
             try await DirectDrive(disk, account: account).validate()
             notice = "登录已验证，已保存在本机。"; return true
         } catch { notice = error.localizedDescription; return false }
@@ -147,7 +187,14 @@ struct DriveLogin: View {
                     Text(session.notice).font(.caption).frame(maxWidth: .infinity, alignment: .leading)
                     Button { session.webView.reload() } label: { Image(systemName: "arrow.clockwise").frame(width: 44, height: 44) }.accessibilityLabel("刷新登录页")
                 }.padding(.horizontal, 16).background(FlowStyle.surface)
-                SessionWebView(session: session)
+                HStack(spacing: 8) {
+                    Button(session.desktopMode ? "切换手机版" : "切换桌面版") { session.setDesktop(!session.desktopMode) }
+                    Spacer()
+                    Button { session.changeZoom(-0.15) } label: { Image(systemName: "minus.magnifyingglass").frame(minWidth: 44, minHeight: 44) }.accessibilityLabel("缩小登录页面")
+                    Button("适合屏幕") { session.fitScreen() }.frame(minHeight: 44)
+                    Button { session.changeZoom(0.15) } label: { Image(systemName: "plus.magnifyingglass").frame(minWidth: 44, minHeight: 44) }.accessibilityLabel("放大登录页面")
+                }.font(.caption).padding(.horizontal, 12).background(FlowStyle.surface)
+                SessionWebView(session: session).frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .navigationTitle(session.disk.title + "网盘").navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -197,7 +244,7 @@ struct AccountSettings: View {
                         busy = true
                         Task {
                             defer { busy = false }
-                            do { account.verifiedAt = nil; try account.save(disk); let driver = DirectDrive(disk, account: account); try await driver.validate(); account = driver.account; onChanged(); notice = "连接验证通过。" }
+                            do { account.verifiedAt = nil; if disk == .xunlei { account.usesWebsiteSession = account.accessToken.isEmpty && account.refreshToken.isEmpty }; try account.save(disk); let driver = DirectDrive(disk, account: account); try await driver.validate(); account = driver.account; onChanged(); notice = "连接验证通过。" }
                             catch { notice = error.localizedDescription }
                         }
                     }.disabled(busy)
@@ -209,7 +256,7 @@ struct AccountSettings: View {
             }
             .navigationTitle(disk.title + "账号").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
-            .sheet(isPresented: $showsLogin) { DriveLogin(disk: disk) { account = DriveAccount.read(disk); onChanged() } }
+            .fullScreenCover(isPresented: $showsLogin) { DriveLogin(disk: disk) { account = DriveAccount.read(disk); onChanged() } }
         }
     }
 }

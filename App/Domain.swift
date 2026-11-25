@@ -45,7 +45,7 @@ struct TransferResult: Codable {
 }
 
 enum ShareText {
-    private static let urls = try! NSRegularExpression(pattern: #"https?://[^\s<>"'，。；、！？“”（）【】]+"#, options: .caseInsensitive)
+    private static let urls = try! NSRegularExpression(pattern: #"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&()*+,;=%]+"#, options: .caseInsensitive)
     private static let suffixCode = try! NSRegularExpression(pattern: #"^[\s,，;；:：）)】—-]*(?:提取码|访问码|密码)\s*[:：]?\s*([A-Za-z0-9]{1,12})(?![A-Za-z0-9])"#)
     private static let identifier = try! NSRegularExpression(pattern: #"^/s/[A-Za-z0-9_-]+$"#)
 
@@ -92,7 +92,8 @@ enum ShareText {
                   identifier.firstMatch(in: parts.percentEncodedPath, range: NSRange(parts.percentEncodedPath.startIndex..., in: parts.percentEncodedPath)) != nil,
                   seen.insert(identity(item.link)).inserted else { return nil }
             let code = parts.queryItems?.first(where: { ["pwd", "pass_code", "password"].contains($0.name.lowercased()) })?.value ?? item.code
-            return ShareJob(id: UUID(), originalURL: item.link, disk: disk, code: code)
+            var normalized = parts; normalized.fragment = nil
+            return ShareJob(id: UUID(), originalURL: normalized.string ?? item.link, disk: disk, code: code)
         }
     }
 

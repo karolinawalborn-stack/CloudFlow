@@ -10,11 +10,14 @@ struct DriveAccount: Codable {
     var deviceID = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
     var directory = ""
     var verifiedAt: Date?
+    var scopedCookies: [StoredDriveCookie]?
+    var usesWebsiteSession: Bool?
 
     var configured: Bool { !cookie.isEmpty || !refreshToken.isEmpty || !accessToken.isEmpty }
     static func read(_ disk: Disk) -> DriveAccount {
         guard let data = Vault.read("drive." + disk.rawValue).data(using: .utf8),
-              let account = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
+              var account = try? JSONDecoder().decode(Self.self, from: data) else { return Self() }
+        if disk == .xunlei, account.usesWebsiteSession == nil { account.usesWebsiteSession = true }
         return account
     }
     func save(_ disk: Disk) throws {
@@ -22,6 +25,22 @@ struct DriveAccount: Codable {
         guard Vault.write(String(decoding: data, as: UTF8.self), to: "drive." + disk.rawValue) else {
             throw ServiceError("登录信息未能保存到手机钥匙串。")
         }
+    }
+}
+
+struct StoredDriveCookie: Codable {
+    let name: String
+    let value: String
+    let domain: String
+    let path: String
+    let secure: Bool
+    let expires: Date?
+    init(_ cookie: HTTPCookie) { name = cookie.name; value = cookie.value; domain = cookie.domain; path = cookie.path; secure = cookie.isSecure; expires = cookie.expiresDate }
+    var cookie: HTTPCookie? {
+        var fields: [HTTPCookiePropertyKey: Any] = [.name: name, .value: value, .domain: domain, .path: path]
+        if secure { fields[.secure] = "TRUE" }
+        if let expires { fields[.expires] = expires }
+        return HTTPCookie(properties: fields)
     }
 }
 
@@ -38,6 +57,7 @@ struct DriveAccount: Codable {
         }
     }
     static func signOut(_ disk: Disk) async throws {
+        if disk == .xunlei { XunleiWebClient.shared.reset() }
         for cookie in await cookies(for: disk) {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 WKWebsiteDataStore.default().httpCookieStore.delete(cookie) { continuation.resume() }

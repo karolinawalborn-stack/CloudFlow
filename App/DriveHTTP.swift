@@ -45,6 +45,10 @@ final class DriveHTTP: NSObject, URLSessionTaskDelegate {
         self.configuration = configuration
         self.disk = disk
         super.init()
+        if let scoped = account.scopedCookies, !scoped.isEmpty {
+            for cookie in scoped.compactMap(\.cookie) { storage.setCookie(cookie) }
+            return
+        }
         for pair in account.cookie.split(separator: ";") {
             let parts = pair.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
             guard parts.count == 2, let cookie = HTTPCookie(properties: [.domain: "." + (disk == .quark ? "quark.cn" : disk == .baidu ? "baidu.com" : "xunlei.com"), .path: "/", .name: parts[0], .value: parts[1], .secure: "TRUE"]) else { continue }
@@ -56,6 +60,14 @@ final class DriveHTTP: NSObject, URLSessionTaskDelegate {
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         guard let url = request.url, allows(url) else { completionHandler(nil); return }
         completionHandler(request)
+    }
+    static func operation(_ path: String) -> String {
+        if path.hasSuffix("/share/verify") { return "验证提取码" }
+        if path.hasSuffix("/share/list") { return "读取分享文件" }
+        if path.hasSuffix("/share/transfer") || path.hasSuffix("/share/restore") { return "转存文件" }
+        if path.hasSuffix("/share/set") || path.hasSuffix("/share") { return "分享请求" }
+        if path.hasSuffix("/gettemplatevariable") { return "检查账号" }
+        return "网盘请求"
     }
     private func allows(_ url: URL) -> Bool {
         guard url.scheme == "https", let host = url.host else { return false }
@@ -91,7 +103,9 @@ final class DriveHTTP: NSObject, URLSessionTaskDelegate {
         catch { throw ServiceError(mutation ? "请求中断，结果待核对。请继续核对任务，避免重复转存。" : "网盘连接失败，请检查网络或重新登录。", uncertain: mutation) }
         guard let http = response as? HTTPURLResponse else { throw ServiceError("网盘返回异常响应。", uncertain: mutation) }
         guard (200..<300).contains(http.statusCode) else {
-            throw ServiceError("网盘返回 HTTP \(http.statusCode)。请重新登录，若提示验证请在登录页完成。", uncertain: mutation && http.statusCode >= 500)
+            let object = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let detail = ["error_description", "errmsg", "message", "error"].map { DriveJSON.string(object, $0) }.first { !$0.isEmpty } ?? "请求参数或验证状态不匹配"
+            throw ServiceError(disk.title + " · " + Self.operation(url.path) + "：HTTP \(http.statusCode)，" + String(detail.prefix(220)), uncertain: mutation && (http.statusCode >= 500 || http.statusCode == 408))
         }
         return data
     }
@@ -105,7 +119,7 @@ final class DriveHTTP: NSObject, URLSessionTaskDelegate {
         case .quark:
             if let status = object["status"] as? Int, status != 200 { throw ServiceError("夸克：" + (DriveJSON.string(object, "message").isEmpty ? "请求失败 \(status)" : DriveJSON.string(object, "message"))) }
         case .baidu:
-            if let code = object["errno"] as? Int, code != 0, !(base.hasSuffix("/api/create") && [4, -2].contains(code)) { throw ServiceError("百度：" + (DriveJSON.string(object, "errmsg").isEmpty ? "错误码 \(code)，请检查提取码和登录状态。" : DriveJSON.string(object, "errmsg"))) }
+            if let code = object["errno"] as? Int, code != 0, !(base.hasSuffix("/api/create") && [4, -2].contains(code)) { throw ServiceError("百度 · " + Self.operation(URL(string: base)?.path ?? "") + "（\(code)）：" + (DriveJSON.string(object, "errmsg").isEmpty ? (code == -9 ? "分享提取码或提取码会话未通过。" : "网盘拒绝本次请求。") : DriveJSON.string(object, "errmsg"))) }
         case .xunlei:
             if !DriveJSON.string(object, "error").isEmpty { throw ServiceError("迅雷：" + (DriveJSON.string(object, "error_description").isEmpty ? DriveJSON.string(object, "error") : DriveJSON.string(object, "error_description"))) }
             if let code = object["code"] as? Int, code != 0 { throw ServiceError("迅雷：" + DriveJSON.string(object, "message")) }

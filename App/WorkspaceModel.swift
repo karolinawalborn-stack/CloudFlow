@@ -4,8 +4,8 @@ import UIKit
 
 @MainActor final class WorkspaceModel: ObservableObject {
     @Published var source = ""
-    @Published var original = ""
-    @Published var draft = ""
+    @Published var original = "" { didSet { if original != oldValue { draft = ""; refreshPublication() } } }
+    @Published var draft = "" { didSet { if draft != oldValue { refreshPublication() } } }
     @Published var output = ""
     @Published var jobs: [ShareJob] = []
     @Published var accounts: [Disk: Bool] = [:]
@@ -24,6 +24,10 @@ import UIKit
     private var backgroundID = UIBackgroundTaskIdentifier.invalid
     private var queue: Task<Void, Never>?
     var pending: [ShareJob] { jobs.filter { $0.status != .done } }
+    var importedJobs: [ShareJob] {
+        let keys = Set(ShareText.parse(source).map { ShareText.identity($0.originalURL) })
+        return jobs.filter { keys.contains(ShareText.identity($0.originalURL)) }
+    }
     var completed: Int { jobs.filter { $0.status == .done }.count }
     var selected: [ShareJob] { jobs.filter { $0.selected && $0.status != .done && $0.status != .running } }
 
@@ -35,7 +39,7 @@ import UIKit
         if let data = try? Data(contentsOf: Self.draftURL), let state = try? JSONDecoder().decode(DraftState.self, from: data) {
             source = state.source; original = state.original; draft = state.draft; output = state.output
         }
-        refreshAccounts()
+        refreshAccounts(); refreshPublication()
     }
     func refreshAccounts() { accounts = Dictionary(uniqueKeysWithValues: Disk.allCases.map { ($0, DriveAccount.read($0).verifiedAt != nil) }) }
     private static var jobsURL: URL { URL.documentsDirectory.appendingPathComponent("cloudflow-jobs.json") }
@@ -48,14 +52,26 @@ import UIKit
     private func persistJobs() throws { try JSONEncoder().encode(jobs).write(to: Self.jobsURL, options: [.atomic, .completeFileProtection]) }
     func update(_ id: UUID, _ edit: (inout ShareJob) -> Void) {
         guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }
-        edit(&jobs[i]); do { try persistJobs() } catch { notice = "任务记录保存失败。" }
+        edit(&jobs[i]); if jobs[i].status == .done { refreshPublication() }; do { try persistJobs() } catch { notice = "任务记录保存失败。" }
     }
     func identify() {
+        let parsed = ShareText.parse(source)
         var seen = Set(jobs.map { ShareText.identity($0.originalURL) })
-        let fresh = ShareText.parse(source).filter { seen.insert(ShareText.identity($0.originalURL)).inserted }
+        let fresh = parsed.filter { seen.insert(ShareText.identity($0.originalURL)).inserted }
         withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.22)) { jobs.insert(contentsOf: fresh, at: 0) }
-        notice = fresh.isEmpty ? "没有新增的有效分享链接。" : "已识别 \(fresh.count) 条链接，选好后开始转存。"
-        if original.isEmpty { original = source }
+        for link in parsed {
+            if let i = jobs.firstIndex(where: { ShareText.identity($0.originalURL) == ShareText.identity(link.originalURL) }), jobs[i].status != .done && jobs[i].status != .running {
+                jobs[i].code = link.code; jobs[i].selected = true
+            }
+        }
+        let summary = Disk.allCases.compactMap { disk -> String? in
+            let count = parsed.filter { $0.disk == disk }.count
+            return count == 0 ? nil : disk.title + " " + String(count)
+        }.joined(separator: "、")
+        let existingDone = importedJobs.filter { $0.status == .done }.count
+        notice = parsed.isEmpty ? "没有识别到有效分享链接。" : "识别共 \(parsed.count) 条（\(summary)），新增 \(fresh.count) 条，已有 \(existingDone) 条成功记录。"
+        if original != source { original = source }
+        refreshPublication()
         do { try persistJobs() } catch { notice = "任务保存失败，请重试。" }
         persistDraft()
     }
@@ -75,8 +91,10 @@ import UIKit
                 running = false
                 if backgroundID != .invalid { UIApplication.shared.endBackgroundTask(backgroundID); backgroundID = .invalid }
             }
+            var attempted = 0; var succeeded = 0; var failed = 0; var uncertain = 0
             for item in work {
                 if stopRequested || Task.isCancelled { break }
+                attempted += 1
                 update(item.id) { $0.status = .running; $0.error = nil }
                 do {
                     let driver = DirectDrive(item.disk)
@@ -87,17 +105,27 @@ import UIKit
                         try self.persistJobs()
                     }
                     update(item.id) { $0.status = .done; $0.result = result; $0.error = nil }
+                    succeeded += 1
                 } catch {
-                    update(item.id) { $0.status = (error as? ServiceError)?.uncertain == true ? .uncertain : .failed; $0.error = error.localizedDescription }
+                    let needsCheck = (error as? ServiceError)?.uncertain == true
+                    if needsCheck { uncertain += 1 } else { failed += 1 }
+                    update(item.id) { $0.status = needsCheck ? .uncertain : .failed; $0.error = error.localizedDescription }
                 }
             }
-            notice = stopRequested ? "队列已停止，已完成的结果已保留。" : "本批次已处理，成功 \(completed) 条。"
+            notice = "本批次处理 \(attempted) 条：成功 \(succeeded)，失败 \(failed)，待核对 \(uncertain)。" + (stopRequested ? "队列已停止。" : "")
+            refreshPublication()
             refreshAccounts()
         }
     }
-    func replaceLinks() {
-        let result = ShareText.rewriteLinks(draft.isEmpty ? original : draft, using: jobs)
-        output = result.text; copyNotice = "已替换 \(result.count) 处链接，其他原链接保持原样。"; persistDraft()
+    func refreshPublication() {
+        let text = draft.isEmpty ? original : draft
+        let result = ShareText.rewriteLinks(text, using: jobs)
+        output = result.text
+        let pending = ShareText.parse(text).filter { link in
+            !jobs.contains { $0.status == .done && ShareText.identity($0.originalURL) == ShareText.identity(link.originalURL) }
+        }.count
+        copyNotice = "已自动替换 \(result.count) 处分享链接。" + (pending > 0 ? "还有 \(pending) 条未成功，暂保留原链接。" : "")
+        persistDraft()
     }
     func loadModels() {
         guard !loadingModels else { return }
@@ -127,7 +155,7 @@ import UIKit
                 try saveModelSettings()
                 let result = try await Service.rewrite(input, tone: style, model: model, base: base, key: key)
                 guard original == input else { copyNotice = "原文已更改，请重新生成改写。"; return }
-                draft = result; output = ""; copyNotice = "改写完成，可编辑后替换链接。"; persistDraft()
+                draft = result; refreshPublication()
             }
             catch { copyNotice = error.localizedDescription }
         }

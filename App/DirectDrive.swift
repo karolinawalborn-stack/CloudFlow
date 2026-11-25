@@ -22,7 +22,7 @@ import Foundation
             guard result["data"] is [String: Any] else { throw ServiceError("夸克登录状态未生效。") }
         case .baidu: _ = try await baiduToken()
         case .xunlei:
-            try await refreshXunlei()
+            if account.usesWebsiteSession != true { try await refreshXunlei() }
             _ = try await xunlei("/files", query: ["parent_id": "", "limit": "1"])
         }
         account.verifiedAt = Date(); try account.save(disk)
@@ -120,20 +120,29 @@ import Foundation
         let common = ["bdstoken": token, "channel": "chunlei", "clienttype": "0", "web": "1"]
         if point == nil {
             let id = URL(string: job.originalURL)!.lastPathComponent
+            var sekey = ""
             if !job.code.isEmpty {
-                let verified = try await http.json("https://pan.baidu.com/share/verify", query: common.merging(["surl": id.hasPrefix("1") ? String(id.dropFirst()) : id]) { _, new in new }, form: ["pwd": job.code, "vcode": "", "vcode_str": ""])
+                let verified = try await http.json("https://pan.baidu.com/share/verify", query: common.merging(["surl": id.hasPrefix("1") ? String(id.dropFirst()) : id]) { _, new in new }, form: ["pwd": job.code, "vcode": "", "vcode_str": ""], headers: ["Referer": job.originalURL])
                 let randsk = DriveJSON.string(verified, "randsk")
-                if !randsk.isEmpty, let cookie = HTTPCookie(properties: [.domain: ".pan.baidu.com", .path: "/", .name: "BDCLND", .value: randsk.removingPercentEncoding ?? randsk, .secure: "TRUE"]) { http.storage.setCookie(cookie) }
+                sekey = randsk.removingPercentEncoding ?? randsk
+                if !sekey.isEmpty {
+                    for old in http.storage.cookies(for: Disk.baidu.homeURL) ?? [] where old.name == "BDCLND" { http.storage.deleteCookie(old) }
+                    if let cookie = HTTPCookie(properties: [.domain: "pan.baidu.com", .path: "/", .name: "BDCLND", .value: sekey, .secure: "TRUE"]) { http.storage.setCookie(cookie) }
+                }
             }
-            let raw = try await http.raw("https://pan.baidu.com/s/" + id)
+            if sekey.isEmpty { sekey = (http.storage.cookies(for: Disk.baidu.homeURL) ?? []).first { $0.name == "BDCLND" }?.value ?? "" }
+            let raw = try await http.raw("https://pan.baidu.com/s/" + id, query: job.code.isEmpty ? [:] : ["pwd": job.code], headers: ["Referer": job.originalURL])
             let html = String(decoding: raw, as: UTF8.self)
-            let shareID = firstMatch(#""shareid"\s*:\s*"?(\d+)"#, in: html)
-            var owner = firstMatch(#""share_uk"\s*:\s*"?(\d+)"#, in: html)
-            if owner.isEmpty { owner = firstMatch(#""uk"\s*:\s*"?(\d+)"#, in: html) }
+            let pageData = BaiduSharePage.decode(html)
+            let shareID = pageData.shareID
+            let owner = pageData.owner
             guard !shareID.isEmpty, !owner.isEmpty else { throw ServiceError("百度分享页需要验证或已失效，请在网盘登录页打开该分享。") }
-            var files: [[String: Any]] = []; var page = 1
-            while true {
-                let list = try await http.json("https://pan.baidu.com/share/list", query: common.merging(["shareid": shareID, "uk": owner, "root": "1", "page": String(page), "num": "100", "order": "other", "desc": "1"]) { _, new in new })
+            var files = pageData.files; var page = 1
+            // The share page already contains the authoritative first page. Fetch the
+            // listing only when it is absent or pagination is needed (e.g. >100 files).
+            while files.isEmpty || files.count >= 100 {
+                if !files.isEmpty && page == 1 { page = 2 }
+                let list = try await http.json("https://pan.baidu.com/share/list", query: common.merging(["shareid": shareID, "uk": owner, "shorturl": id.hasPrefix("1") ? String(id.dropFirst()) : id, "sekey": sekey, "root": "1", "page": String(page), "num": "100", "order": "other", "desc": "1", "showempty": "0"]) { _, new in new }, headers: ["Referer": job.originalURL])
                 let rows = DriveJSON.rows(list, "list"); files += rows
                 if rows.count < 100 { break }; page += 1
                 guard page <= 1000 else { throw ServiceError("分享顶层文件超过十万项，请拆分分享。") }
@@ -144,7 +153,7 @@ import Foundation
             let created = try await http.json("https://pan.baidu.com/api/create", query: ["a": "commit", "bdstoken": token], form: ["path": folder, "isdir": "1", "block_list": "[]"])
             _ = created
             point = TransferCheckpoint(stage: .saving, title: DriveJSON.string(files[0], "server_filename")); try checkpoint(point!)
-            let save = try await http.json("https://pan.baidu.com/share/transfer", query: common.merging(["shareid": shareID, "from": owner, "ondup": "newcopy"]) { _, new in new }, form: ["fsidlist": "[" + ids.joined(separator: ",") + "]", "path": folder], mutation: true)
+            let save = try await http.json("https://pan.baidu.com/share/transfer", query: common.merging(["shareid": shareID, "from": owner, "ondup": "newcopy"]) { _, new in new }, form: ["fsidlist": "[" + ids.joined(separator: ",") + "]", "path": folder, "sekey": sekey], headers: ["Referer": job.originalURL], mutation: true)
             let newIDs = DriveJSON.rows(save, "extra.list").map { DriveJSON.string($0, "to_fs_id") }
             guard newIDs.count == ids.count, newIDs.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { throw ServiceError("百度转存请求已提交，但新文件编号不完整，请到网盘核对。", uncertain: true) }
             point!.savedIDs = newIDs; point!.stage = .saved; try checkpoint(point!)
@@ -175,6 +184,9 @@ import Foundation
         try account.save(.xunlei)
     }
     private func xunlei(_ path: String, query: [String: String] = [:], body: [String: Any]? = nil, mutation: Bool = false) async throws -> [String: Any] {
+        if account.usesWebsiteSession == true {
+            return try await XunleiWebClient.shared.request(path, query: query, body: body, mutation: mutation)
+        }
         try await refreshXunlei()
         let headers = ["Authorization": "Bearer " + account.accessToken, "x-captcha-token": account.captchaToken, "x-client-id": account.clientID, "x-device-id": account.deviceID]
         let result = try await http.json("https://api-pan.xunlei.com/drive/v1" + path, query: query, body: body, headers: headers, mutation: mutation)
@@ -185,7 +197,7 @@ import Foundation
             let id = URL(string: job.originalURL)!.lastPathComponent
             var files: [[String: Any]] = []; var pageToken = ""; var info: [String: Any] = [:]
             repeat {
-                info = try await xunlei("/share", query: ["share_id": id, "pass_code": job.code, "limit": "100", "page_token": pageToken])
+                info = try await xunlei("/share", query: ["share_id": id, "pass_code": job.code, "limit": "100", "page_token": pageToken, "pass_code_token": "", "thumbnail_size": "SIZE_SMALL"])
                 guard DriveJSON.string(info, "share_status") == "OK" else { throw ServiceError("迅雷：分享不可用，请检查提取码。") }
                 files += DriveJSON.rows(info, "files")
                 let next = DriveJSON.string(info, "next_page_token")

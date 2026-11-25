@@ -19,7 +19,7 @@ jobs:
           "$RUNNER_TEMP/domain-tests"
       - name: Provider adapter regression tests
         run: |
-          swiftc App/Domain.swift App/Services.swift App/DriveAccount.swift App/DriveHTTP.swift App/DirectDrive.swift Tests/ProviderTests.swift -o "$RUNNER_TEMP/provider-tests"
+          swiftc App/Domain.swift App/Services.swift App/DriveAccount.swift App/DriveHTTP.swift App/DirectDrive.swift App/XunleiWebClient.swift App/BaiduSharePage.swift Tests/ProviderTests.swift -o "$RUNNER_TEMP/provider-tests"
           "$RUNNER_TEMP/provider-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -57,7 +57,7 @@ jobs:
           xcrun simctl shutdown "$DEVICE"
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudFlow-phone-direct-0.3
+          name: CloudFlow-phone-direct-0.3.1
           path: |
             dist/CloudFlow-unsigned.ipa
             dist/SHA256SUMS.txt
