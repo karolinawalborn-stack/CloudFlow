@@ -14,6 +14,7 @@ import WebKit
         if webView == nil {
             let config = WKWebViewConfiguration(); config.websiteDataStore = .default()
             let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 390, height: 844), configuration: config)
+            view.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
             view.navigationDelegate = self
             webView = view; loaded = false; loadError = nil
             view.load(URLRequest(url: Disk.xunlei.homeURL))

@@ -117,6 +117,11 @@ final class FixtureProtocol: URLProtocol {
         let parsed = BaiduSharePage.decode(html)
         check(parsed.owner == "456", "Share owner is not signed-in user's uk")
         check(parsed.files.count == 2, "Use embedded top-level share files")
+        let modernHTML = #"<script id="locals-data" type="application/json">{"uk":999,"share_uk":"456","shareid":123,"file_list":[{"fs_id":101,"server_filename":"资源"}]}</script>"#
+        let modern = BaiduSharePage.decode(modernHTML)
+        check(modern.owner == "456" && modern.files.count == 1, "Parse current Baidu locals-data JSON")
+        let initHTML = #"window.yunData={uk:'0',share_uk:"456",shareid:"123"};"#
+        check(BaiduSharePage.decode(initHTML).shareID == "123", "Parse unquoted fields on extraction-code page")
         var verifiedCode = ""; var transferredIDs = ""; var sentKey = ""; var listed = false
         FixtureProtocol.rawHandler = { request in
             let path = request.url!.path

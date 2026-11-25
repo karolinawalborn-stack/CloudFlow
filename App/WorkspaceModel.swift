@@ -29,7 +29,7 @@ import UIKit
         return jobs.filter { keys.contains(ShareText.identity($0.originalURL)) }
     }
     var completed: Int { jobs.filter { $0.status == .done }.count }
-    var selected: [ShareJob] { jobs.filter { $0.selected && $0.status != .done && $0.status != .running } }
+    var selected: [ShareJob] { importedJobs.filter { $0.selected && [.ready, .failed].contains($0.status) } }
 
     init() {
         if let data = try? Data(contentsOf: Self.jobsURL), var records = try? JSONDecoder().decode([ShareJob].self, from: data) {
@@ -40,7 +40,31 @@ import UIKit
             source = state.source; original = state.original; draft = state.draft; output = state.output
         }
         refreshAccounts(); refreshPublication()
+        #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--verify-workspace") { verifyWorkspace() }
+        #endif
     }
+    #if DEBUG
+    private func verifyWorkspace() {
+        let text = "https://pan.baidu.com/s/1fixtureA?pwd=igfg\nhttps://pan.quark.cn/s/fixtureA\nhttps://pan.xunlei.com/s/fixtureA?pwd=jqnr#\nhttps://pan.baidu.com/s/1fixtureB?pwd=gj39\nhttps://pan.quark.cn/s/fixtureB\nhttps://pan.xunlei.com/s/fixtureB?pwd=7ehq#"
+        jobs = ShareText.parse(text)
+        source = text; original = text
+        let completedQuark = jobs.first { $0.disk == .quark }!
+        update(completedQuark.id) { $0.status = .done; $0.result = TransferResult(shareURL: "https://pan.quark.cn/s/my-new-share", code: "", title: "测试") }
+        precondition(importedJobs.count == 6, "Completed quark remains visible")
+        precondition(output.contains("my-new-share"), "Share completion automatically replaces URL")
+        precondition(selected.count == 5, "Completed task excluded from next batch")
+        draft = "新文案 " + text
+        precondition(output.hasPrefix("新文案 ") && output.contains("my-new-share"), "Editing draft automatically updates publication")
+        let other = ShareText.parse("https://pan.baidu.com/s/old-history")[0]
+        jobs.append(other)
+        precondition(importedJobs.count == 6 && !selected.contains { $0.id == other.id }, "Unrelated task excluded from this import")
+        original = "下一段 https://pan.quark.cn/s/fixtureA"
+        precondition(draft.isEmpty && output.contains("my-new-share"), "New original clears stale draft and replaces links")
+        try? "PASS: workspace auto-publication and six-link visibility".write(to: URL.documentsDirectory.appendingPathComponent("workspace-self-check.txt"), atomically: true, encoding: .utf8)
+        jobs = []; source = ""; original = ""; draft = ""; output = ""; try? persistJobs()
+    }
+    #endif
     func refreshAccounts() { accounts = Dictionary(uniqueKeysWithValues: Disk.allCases.map { ($0, DriveAccount.read($0).verifiedAt != nil) }) }
     private static var jobsURL: URL { URL.documentsDirectory.appendingPathComponent("cloudflow-jobs.json") }
     private static var draftURL: URL { URL.documentsDirectory.appendingPathComponent("cloudflow-draft.json") }
@@ -75,12 +99,15 @@ import UIKit
         do { try persistJobs() } catch { notice = "任务保存失败，请重试。" }
         persistDraft()
     }
-    func selectAll(_ selected: Bool) { for i in jobs.indices where jobs[i].status != .done && jobs[i].status != .running { jobs[i].selected = selected } }
+    func selectAll(_ selected: Bool) {
+        let ids = Set(importedJobs.map(\.id))
+        for i in jobs.indices where ids.contains(jobs[i].id) && jobs[i].status != .done && jobs[i].status != .running { jobs[i].selected = selected }
+    }
     func importResult(_ result: TransferResult, for job: ShareJob) { update(job.id) { $0.result = result; $0.status = .done; $0.error = nil }; notice = "新分享链接已导入。" }
     func reset(_ job: ShareJob) { update(job.id) { $0.checkpoint = nil; $0.error = nil; $0.status = .ready }; notice = "任务已重置，下次将重新发起转存。" }
     func start(only id: UUID? = nil) {
         guard !running else { return }
-        let work = jobs.filter { job in id == nil ? (job.selected && [.ready, .failed].contains(job.status)) : job.id == id && job.status != .done }
+        let work = id == nil ? selected : jobs.filter { $0.id == id && $0.status != .done && $0.status != .running }
         guard !work.isEmpty else { notice = "请选择待转存任务；待核对任务请单独继续。"; return }
         running = true; stopRequested = false
         backgroundID = UIApplication.shared.beginBackgroundTask(withName: "CloudFlowTransfer") { [weak self] in

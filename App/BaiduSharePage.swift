@@ -10,6 +10,15 @@ struct BaiduSharePage {
             return String(html[range])
         }
         func scalar(_ value: Any?) -> String { (value as? String) ?? (value as? NSNumber)?.stringValue ?? "" }
+        if let regex = try? NSRegularExpression(pattern: #"(?is)<script\b[^>]*\bid=["']locals-data["'][^>]*>(.*?)</script>"#),
+           let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
+           let range = Range(match.range(at: 1), in: html), let data = String(html[range]).data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let shareID = scalar(object["shareid"] ?? object["share_id"])
+            let owner = scalar(object["share_uk"])
+            let list = (object["file_list"] as? [String: Any])?["list"] ?? object["file_list"] ?? object["list"]
+            if !shareID.isEmpty, !owner.isEmpty { return Self(shareID: shareID, owner: owner, files: list as? [[String: Any]] ?? []) }
+        }
         // Parse complete JSON values from known page-data assignments, rather than
         // accidentally matching the signed-in user's uk or nested child files.
         for anchor in ["locals.mset", "yunData.setData", "window.yunData", "var yunData", "let yunData", "const yunData"] {
@@ -20,8 +29,8 @@ struct BaiduSharePage {
             let list = (object["file_list"] as? [String: Any])?["list"] ?? object["file_list"] ?? object["fileList"] ?? object["list"]
             if !shareID.isEmpty, !owner.isEmpty { return Self(shareID: shareID, owner: owner, files: list as? [[String: Any]] ?? []) }
         }
-        let shareID = capture(#""(?:shareid|share_id)"\s*:\s*"?(\d+)"#)
-        var owner = capture(#""share_uk"\s*:\s*"?(\d+)"#)
+        let shareID = capture(#"["']?(?:shareid|share_id)["']?\s*:\s*["']?(\d+)"#)
+        var owner = capture(#"["']?share_uk["']?\s*:\s*["']?(\d+)"#)
         if owner.isEmpty { owner = capture(#""uk"\s*:\s*"?(\d+)"#) }
         var files: [[String: Any]] = []
         if let regex = try? NSRegularExpression(pattern: #""(?:file_list|fileList|list)"\s*:\s*(\[)"#) {

@@ -36,12 +36,29 @@ import Foundation
         check(protected.restore(protected.text) == sample, "Restore original URL and code exactly")
         check(protected.restore("missing all markers") == nil, "Reject dropped markers")
         check(protected.restore(protected.text + protected.replacements[0].marker) == nil, "Reject repeated marker")
-        let mixed = "夸克：https://pan.quark.cn/s/9cf83d7b7c4e标题\n迅雷：https://pan.xunlei.com/s/fixture?pwd=jqnr#\n百度：https://pan.baidu.com/s/1fixture?pwd=igfg"
+        let mixed = "夸克：https://pan.quark.cn/s/aabbcc001122标题\n迅雷：https://pan.xunlei.com/s/fixture?pwd=jqnr#\n百度：https://pan.baidu.com/s/1fixture?pwd=igfg"
         let all = ShareText.parse(mixed)
         check(all.count == 3, "Recognize URLs adjacent to Chinese text")
         check(all.first { $0.disk == .xunlei }?.originalURL.hasSuffix("#") == false, "Strip inert trailing fragment")
         check(all.first { $0.disk == .xunlei }?.code == "jqnr", "Fragment does not contaminate extraction code")
         check(ShareText.parse("https://pan.quark.cn/s/abc?pwd=1234\n提取码：1234").count == 1, "Multiline extraction code")
+        let userInput = """
+        暑假 07
+        https://pan.baidu.com/s/1test-0jNm3WbtKMPKzntN-Yw?pwd=igfg
+        https://pan.quark.cn/s/aabbcc001122
+        https://pan.xunlei.com/s/VP6testR04NA0iPU69t3m2_PA1?pwd=jqnr#
+
+        碰撞搜查线 第二季 01
+        https://pan.baidu.com/s/1test4Ct6sVoyIi2kCRUaoCA?pwd=gj39
+        https://pan.quark.cn/s/aabbcc334455
+        https://pan.xunlei.com/s/VP6test-h8RcaZx2q9lEnp_CA1?pwd=7ehq#
+        """
+        let six = ShareText.parse(userInput)
+        check(six.count == 6, "Reported input shape recognizes all six links")
+        for disk in Disk.allCases { check(six.filter { $0.disk == disk }.count == 2, "Input shape has two links per provider") }
+        check(six.filter { $0.disk == .baidu }.map(\.code) == ["igfg", "gj39"], "Baidu passwords")
+        check(six.filter { $0.disk == .xunlei }.map(\.code) == ["jqnr", "7ehq"], "Xunlei passwords without trailing fragment")
+        check(six.filter { $0.disk == .quark }.allSatisfy { $0.code.isEmpty }, "No password leaks across provider links")
         print("PASS: \(count) domain regression checks")
     }
 }
