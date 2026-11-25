@@ -15,7 +15,7 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         PRODUCT_BUNDLE_IDENTIFIER: app.cloudflow.personal
-        MARKETING_VERSION: 0.3.1
-        CURRENT_PROJECT_VERSION: 4
+        MARKETING_VERSION: 0.4.0
+        CURRENT_PROJECT_VERSION: 5
         SWIFT_VERSION: '5.0'
         TARGETED_DEVICE_FAMILY: '1,2'

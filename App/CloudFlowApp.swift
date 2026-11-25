@@ -6,10 +6,29 @@ import UIKit
 }
 
 struct Workspace: View {
-    enum Page: String, CaseIterable { case desk = "工作台", tasks = "任务", copy = "文案", settings = "设置" }
+    enum Page: String, CaseIterable, Identifiable {
+        case desk = "工作台", tasks = "任务", copy = "文案", settings = "设置"
+        var id: String { rawValue }
+        var icon: String {
+            switch self {
+            case .desk: return "square.grid.2x2.fill"
+            case .tasks: return "arrow.triangle.2.circlepath"
+            case .copy: return "sparkles"
+            case .settings: return "slider.horizontal.3"
+            }
+        }
+        var eyebrow: String {
+            switch self {
+            case .desk: return "YOUR CONTENT, CONNECTED."
+            case .tasks: return "EVERY TRANSFER, IN VIEW."
+            case .copy: return "MAKE IT YOUR OWN."
+            case .settings: return "CONNECTED, ON YOUR TERMS."
+            }
+        }
+    }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.dynamicTypeSize) private var typeSize
+    @AppStorage(FlowStyle.lowMotionKey) private var lowMotion = false
     @StateObject private var model = WorkspaceModel()
     @State private var page = Self.initialPage()
     private static func initialPage() -> Page {
@@ -29,12 +48,16 @@ struct Workspace: View {
     @State private var copyStage = "原文"
 
     var body: some View {
-        TabView(selection: $page) {
-            screen(.desk, eyebrow: "YOUR CONTENT, CONNECTED.") { desk }.tabItem { Label("工作台", systemImage: "square.grid.2x2.fill") }.tag(Page.desk)
-            screen(.tasks, eyebrow: "EVERY TRANSFER, IN VIEW.") { tasks }.tabItem { Label("任务", systemImage: "arrow.triangle.2.circlepath") }.tag(Page.tasks)
-            screen(.copy, eyebrow: "MAKE IT YOUR OWN.") { copyStudio }.tabItem { Label("文案", systemImage: "sparkles") }.tag(Page.copy)
-            screen(.settings, eyebrow: "CONNECTED, ON YOUR TERMS.") { settings }.tabItem { Label("设置", systemImage: "slider.horizontal.3") }.tag(Page.settings)
+        ZStack(alignment: .bottom) {
+            FlowBackdrop()
+            // Only the visible page is alive, so edits on one page never
+            // re-render the other three.
+            pageContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            FlowTabBar(page: $page, attention: model.attentionCount, running: model.running)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
         }
+        .foregroundStyle(FlowStyle.text)
         .tint(FlowStyle.accent)
         .sheet(item: $accountDisk) { disk in AccountSettings(disk: disk) { model.refreshAccounts() } }
         .fullScreenCover(item: $openedJob) { job in DriveLogin(disk: job.disk, url: URL(string: job.originalURL)) { model.refreshAccounts() } }
@@ -46,212 +69,642 @@ struct Workspace: View {
         .onChange(of: scenePhase) { phase in if phase != .active { model.persistDraft() } }
         .onChange(of: page) { _ in model.persistDraft() }
     }
-    private func screen<V: View>(_ page: Page, eyebrow: String, @ViewBuilder content: () -> V) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                HStack {
-                    HStack(spacing: 8) {
-                        Image(systemName: "square.stack.3d.up.fill").foregroundStyle(FlowStyle.accent)
-                        Text("CloudFlow").font(.headline)
+
+    @ViewBuilder private var pageContent: some View {
+        switch page {
+        case .desk:
+            DeskPage(model: model, accountDisk: $accountDisk).transition(pageTransition)
+        case .tasks:
+            TasksPage(model: model, filter: $filter, openedJob: $openedJob, importing: $importing, resetJob: $resetJob).transition(pageTransition)
+        case .copy:
+            CopyPage(model: model, stage: $copyStage).transition(pageTransition)
+        case .settings:
+            SettingsPage(model: model, accountDisk: $accountDisk).transition(pageTransition)
+        }
+    }
+    private var pageTransition: AnyTransition {
+        if reduceMotion || lowMotion { return .opacity }
+        return .asymmetric(insertion: .opacity.combined(with: .offset(y: 18)).combined(with: .scale(scale: 0.985)), removal: .opacity)
+    }
+}
+
+// MARK: - Chrome
+
+struct FlowTabBar: View {
+    @Binding var page: Workspace.Page
+    let attention: Int
+    let running: Bool
+    @Namespace private var ns
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Workspace.Page.allCases) { item in
+                let selected = item == page
+                Button {
+                    guard !selected else { return }
+                    Haptics.select()
+                    withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .spring(response: 0.42, dampingFraction: 0.84)) { page = item }
+                } label: {
+                    VStack(spacing: 3) {
+                        ZStack(alignment: .topTrailing) {
+                            Image(systemName: item.icon).font(.system(size: 17, weight: .semibold)).frame(width: 28, height: 22)
+                            if item == .tasks && (attention > 0 || running) {
+                                PulseDot(color: running ? FlowStyle.accent : FlowStyle.warning, active: running, size: 7).offset(x: 3, y: -1)
+                            }
+                        }
+                        Text(item.rawValue).font(.system(size: 10, weight: .semibold))
                     }
-                    Spacer()
-                    Label("本机直连", systemImage: "iphone").font(.caption.weight(.medium)).foregroundStyle(FlowStyle.muted)
+                    .foregroundStyle(selected ? FlowStyle.accent : FlowStyle.muted)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .background {
+                        if selected {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(FlowStyle.accent.opacity(0.12))
+                                .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(FlowStyle.accent.opacity(0.35), lineWidth: 1))
+                                .matchedGeometryEffect(id: "tab", in: ns)
+                        }
+                    }
+                    .contentShape(Rectangle())
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(eyebrow).font(.caption2.weight(.semibold)).tracking(2).foregroundStyle(FlowStyle.accent)
-                    Text(page.rawValue).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-                }
-                content()
-            }.frame(maxWidth: 680, alignment: .leading).padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 28).frame(maxWidth: .infinity)
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.rawValue)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
         }
-        .background(FlowBackdrop().ignoresSafeArea())
-        .foregroundStyle(FlowStyle.text)
+        .padding(6)
+        .background(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .fill(FlowStyle.surface.opacity(0.96))
+                .shadow(color: .black.opacity(0.45), radius: 18, y: 8)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(FlowStyle.hairline, lineWidth: 1))
+        .frame(maxWidth: 520)
+        .padding(.horizontal, 18)
+        .padding(.bottom, 6)
+    }
+}
+
+struct FlowHeader: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 9, style: .continuous).fill(FlowStyle.accentGradient)
+                Image(systemName: "square.stack.3d.up.fill").font(.system(size: 13, weight: .bold)).foregroundStyle(FlowStyle.ink)
+            }
+            .frame(width: 28, height: 28)
+            .shadow(color: FlowStyle.accent.opacity(0.4), radius: 8)
+            .accessibilityHidden(true)
+            Text("CloudFlow").font(.system(size: 17, weight: .bold, design: .rounded))
+            Spacer()
+            HStack(spacing: 7) {
+                PulseDot(color: FlowStyle.success, active: true, size: 6)
+                Text("本机直连").font(.system(size: 11, weight: .semibold))
+            }
+            .foregroundStyle(FlowStyle.muted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.white.opacity(0.05)))
+            .overlay(Capsule().strokeBorder(FlowStyle.border, lineWidth: 1))
+        }
+    }
+}
+
+struct PageScaffold<Content: View>: View {
+    let page: Workspace.Page
+    let content: Content
+    init(_ page: Workspace.Page, @ViewBuilder content: () -> Content) { self.page = page; self.content = content() }
+
+    var body: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 22) {
+                FlowHeader()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(page.eyebrow).font(FlowStyle.mono).tracking(2.4).foregroundStyle(FlowStyle.accentGradient)
+                    Text(page.rawValue).font(.system(size: 34, weight: .bold, design: .rounded)).accessibilityAddTraits(.isHeader)
+                }
+                .riseIn(0)
+                content
+            }
+            .frame(maxWidth: 680, alignment: .leading)
+            .padding(.horizontal, 20)
+            .padding(.top, 10)
+            .padding(.bottom, 120)
+            .frame(maxWidth: .infinity)
+        }
         .scrollDismissesKeyboard(.interactively)
-        .toolbarBackground(FlowStyle.background, for: .tabBar)
-        .toolbarBackground(.visible, for: .tabBar)
     }
-    private var desk: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            hero
-            accountBand
-            FlowCard {
-                HStack { section("导入素材", subtitle: "链接与文案，一次粘贴"); Spacer(); Image(systemName: "arrow.down.doc").foregroundStyle(FlowStyle.accent) }
-                editor("链接与文案", text: $model.source, height: 145, prompt: "粘贴夸克、迅雷、百度分享链接\n也支持带链接的整段文案…")
-                HStack {
-                    PasteButton(payloadType: String.self) { if let text = $0.first { model.source = text } }.labelStyle(.titleAndIcon).tint(FlowStyle.accent)
-                    Spacer(minLength: 8)
-                    Button { model.identify() } label: { Label("识别链接", systemImage: "viewfinder") }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }
-            HStack { section("本次识别", subtitle: "成功记录也保留显示，避免重复转存"); Spacer(); Text("\(model.importedJobs.count)").font(.title3.monospacedDigit().bold()).foregroundStyle(FlowStyle.accent) }
-            if model.importedJobs.isEmpty { empty("还没有识别链接", detail: "粘贴素材，开始你的第一条内容流。", symbol: "tray") }
-            else {
-                HStack {
-                    Button("全选") { model.selectAll(true) }
-                    Text("/").foregroundStyle(FlowStyle.muted)
-                    Button("取消全选") { model.selectAll(false) }
-                    Spacer(); Text("已选 \(model.selected.count)").font(.caption).foregroundStyle(FlowStyle.muted)
-                }.font(.subheadline).frame(minHeight: 44)
-                ForEach(model.importedJobs) { job in taskCard(job, compact: job.status != .done).transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .bottom))) }
-            }
-            notice(model.notice)
-            if model.running {
-                FlowCard {
-                    HStack { ProgressView().tint(FlowStyle.accent); Text("正在转存并生成分享链接").font(.subheadline.weight(.medium)); Spacer() }
-                    Button(model.stopRequested ? "将在当前任务完成后停止" : "完成当前任务后停止") { model.stopRequested = true }.buttonStyle(FlowButtonStyle(primary: false)).disabled(model.stopRequested)
-                }
-            } else {
-                Button { model.start() } label: { HStack { Text("批量转存并生成链接"); Spacer(); Image(systemName: "arrow.up.right") }.frame(maxWidth: .infinity) }
-                    .buttonStyle(FlowButtonStyle(primary: true)).disabled(model.selected.isEmpty)
-            }
-        }
-    }
-    private var hero: some View {
+}
+
+// MARK: - Shared blocks
+
+struct HeroPanel: View {
+    let pending: Int
+    let completed: Int
+    let connected: Int
+
+    var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("好内容，\n即刻变成你的分享。").font(.title2.weight(.bold)).lineSpacing(5)
+                VStack(alignment: .leading, spacing: 10) {
+                    TechLabel(index: "SYS", title: "CONTENT RELAY")
+                    Text("好内容，\n即刻变成你的分享。").font(.system(size: 24, weight: .bold, design: .rounded)).lineSpacing(4)
                     Text("批量转存 · 链接焕新 · AI 文案").font(.caption).foregroundStyle(FlowStyle.muted)
                 }
-                Spacer(minLength: 4)
-                Image(systemName: "arrow.triangle.branch").font(.system(size: 42, weight: .light)).foregroundStyle(FlowStyle.accent).rotationEffect(.degrees(-90)).padding(.top, 8).accessibilityHidden(true)
+                Spacer(minLength: 8)
+                FlowCore().padding(.top, 2)
             }
-            HStack(spacing: 0) {
-                metric("待处理", value: String(model.pending.count))
-                Divider().overlay(FlowStyle.border)
-                metric("已完成", value: String(model.completed))
-                Divider().overlay(FlowStyle.border)
-                metric("已连接", value: "\(model.accounts.values.filter { $0 }.count)/3")
-            }.fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 10) {
+                MetricTile(title: "待处理", value: pending, tint: FlowStyle.accent2)
+                MetricTile(title: "已完成", value: completed, tint: FlowStyle.success)
+                MetricTile(title: "已连接", value: connected, suffix: "/3", tint: FlowStyle.accent)
+            }
         }
-        .padding(22)
-        .background(LinearGradient(colors: [Color(red: 0.08, green: 0.20, blue: 0.22), FlowStyle.surface], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 24))
-        .overlay { RoundedRectangle(cornerRadius: 24).strokeBorder(FlowStyle.accent.opacity(0.2)) }
+        .padding(20)
+        .background {
+            ZStack {
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(red: 0.07, green: 0.12, blue: 0.24), Color(red: 0.045, green: 0.055, blue: 0.12)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                RadialGradient(colors: [FlowStyle.accent.opacity(0.22), .clear], center: .topTrailing, startRadius: 0, endRadius: 220)
+                    .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            }
+        }
+        .orbitBorder(cornerRadius: 26)
     }
-    private func metric(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) { Text(value).font(.title2.monospacedDigit().weight(.semibold)); Text(title).font(.caption2).foregroundStyle(FlowStyle.muted) }.frame(maxWidth: .infinity, alignment: .center)
-    }
-    private var accountBand: some View {
+}
+
+struct AccountBand: View {
+    let accounts: [Disk: Bool]
+    let onSelect: (Disk) -> Void
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: typeSize.isAccessibilitySize ? 1 : 3), spacing: 10) {
             ForEach(Disk.allCases) { disk in
-                Button { accountDisk = disk } label: {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack { FlowGlyph(symbol: FlowStyle.diskIcon(disk), color: FlowStyle.diskColor(disk), size: 34); Spacer(minLength: 0) }
-                        Text(disk.title).font(.subheadline.bold()).foregroundStyle(FlowStyle.text)
-                        HStack(spacing: 4) { Circle().fill(model.accounts[disk] == true ? FlowStyle.success : FlowStyle.muted).frame(width: 5, height: 5); Text(model.accounts[disk] == true ? "已连接" : "点击登录").font(.caption2).foregroundStyle(FlowStyle.muted) }
-                    }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(FlowStyle.surface, in: RoundedRectangle(cornerRadius: 18)).overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(FlowStyle.border) }
-                }.buttonStyle(.plain).accessibilityLabel(disk.title + (model.accounts[disk] == true ? "已连接，管理账号" : "登录账号"))
+                let connected = accounts[disk] == true
+                Button { Haptics.tap(); onSelect(disk) } label: { DiskTile(disk: disk, connected: connected) }
+                    .buttonStyle(PressableStyle())
+                    .accessibilityLabel(disk.title + (connected ? "已连接，管理账号" : "登录账号"))
             }
         }
     }
-    private var tasks: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack { section("任务记录", subtitle: "成功与中断，都有迹可循"); Spacer(); Text("\(model.completed)/\(model.jobs.count)").font(.headline.monospacedDigit()).foregroundStyle(FlowStyle.accent) }
-            Picker("任务筛选", selection: $filter) { ForEach(["全部", "成功", "需处理"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-            let visible = model.jobs.filter { filter == "全部" || (filter == "成功" && $0.status == .done) || (filter == "需处理" && [.ready, .failed, .uncertain].contains($0.status)) }
-            if visible.isEmpty { empty("这里暂时没有任务", detail: "处理过的链接将保存在本机。", symbol: "checklist") }
-            ForEach(visible) { taskCard($0, compact: false) }
-            notice(model.notice)
+}
+
+struct DiskTile: View {
+    let disk: Disk
+    let connected: Bool
+
+    var body: some View {
+        let tint = FlowStyle.diskColor(disk)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                FlowGlyph(symbol: FlowStyle.diskIcon(disk), color: tint, size: 34)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(FlowStyle.muted.opacity(0.6))
+            }
+            Text(disk.title + "网盘").font(.subheadline.bold()).foregroundStyle(FlowStyle.text).lineLimit(1).minimumScaleFactor(0.8)
+            HStack(spacing: 6) {
+                PulseDot(color: connected ? FlowStyle.success : FlowStyle.muted.opacity(0.6), active: connected, size: 6)
+                Text(connected ? "已连接" : "点击登录").font(.caption2).foregroundStyle(connected ? FlowStyle.success : FlowStyle.muted)
+            }
         }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 20, style: .continuous).fill(FlowStyle.cardFill))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(connected ? AnyShapeStyle(LinearGradient(colors: [tint.opacity(0.65), tint.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing)) : AnyShapeStyle(FlowStyle.hairline), lineWidth: 1)
+        )
     }
-    private func taskCard(_ job: ShareJob, compact: Bool) -> some View {
-        FlowCard {
+}
+
+struct TaskRow: View {
+    let job: ShareJob
+    let compact: Bool
+    let running: Bool
+    var onToggle: () -> Void = {}
+    var onCopy: (String) -> Void = { _ in }
+    var onStart: () -> Void = {}
+    var onOpen: () -> Void = {}
+    var onImport: () -> Void = {}
+    var onReset: () -> Void = {}
+
+    private var title: String {
+        if let result = job.result, !result.title.isEmpty { return result.title }
+        return job.disk.title + "分享"
+    }
+
+    var body: some View {
+        let tint = FlowStyle.diskColor(job.disk)
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
                 if compact {
-                    Button { model.update(job.id) { $0.selected.toggle() } } label: { Image(systemName: job.selected ? "checkmark.circle.fill" : "circle").font(.title3).frame(width: 44, height: 44).foregroundStyle(job.selected ? FlowStyle.accent : FlowStyle.muted) }.disabled(model.running).accessibilityLabel(job.selected ? "取消选择任务" : "选择任务")
-                } else { FlowGlyph(symbol: FlowStyle.diskIcon(job.disk), color: FlowStyle.diskColor(job.disk)) }
+                    Button(action: onToggle) {
+                        ZStack {
+                            Circle().strokeBorder(job.selected ? FlowStyle.accent : FlowStyle.muted.opacity(0.5), lineWidth: 1.5)
+                            if job.selected {
+                                Circle().fill(FlowStyle.accentGradient).padding(3).transition(.scale.combined(with: .opacity))
+                                Image(systemName: "checkmark").font(.system(size: 10, weight: .heavy)).foregroundStyle(FlowStyle.ink)
+                            }
+                        }
+                        .frame(width: 26, height: 26)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(running)
+                    .accessibilityLabel(job.selected ? "取消选择任务" : "选择任务")
+                } else {
+                    FlowGlyph(symbol: FlowStyle.diskIcon(job.disk), color: tint)
+                }
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(job.result?.title.isEmpty == false ? job.result!.title : job.disk.title + "分享").font(.subheadline.bold()).lineLimit(2)
-                    Text(job.originalURL).font(.caption2).foregroundStyle(FlowStyle.muted).lineLimit(1).truncationMode(.middle)
+                    HStack(spacing: 6) {
+                        Text(job.disk.title).font(FlowStyle.mono).foregroundStyle(tint)
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(tint.opacity(0.12)))
+                        Text(title).font(.subheadline.bold()).lineLimit(2)
+                    }
+                    Text(job.originalURL).font(.system(size: 11, design: .monospaced)).foregroundStyle(FlowStyle.muted).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 4)
-                if job.status == .running { ProgressView().tint(FlowStyle.accent) }
-                else { Text(status(job.status)).font(.caption2.weight(.semibold)).foregroundStyle(job.status == .done ? FlowStyle.success : job.status == .uncertain ? FlowStyle.warning : FlowStyle.muted) }
+                StatusPill(status: job.status)
             }
+            if job.status == .running { ScanLine() }
             if let result = job.result, job.status == .done {
-                Text(result.shareText).font(.caption).foregroundStyle(FlowStyle.accent).textSelection(.enabled)
-                HStack {
-                    Button { UIPasteboard.general.string = result.shareText; model.notice = "分享链接已复制。" } label: { Label("复制链接", systemImage: "doc.on.doc") }
-                    Spacer()
-                    ShareLink(item: result.shareText) { Image(systemName: "square.and.arrow.up").frame(width: 44, height: 44) }.accessibilityLabel("分享新链接")
-                }.font(.subheadline.weight(.medium))
-            }
-            if let error = job.error { Text(error).font(.caption).foregroundStyle(FlowStyle.warning).fixedSize(horizontal: false, vertical: true) }
-            if job.status != .done && !compact {
-                if job.status != .running {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(result.shareText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(FlowStyle.accent)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     HStack {
-                        Button(job.status == .uncertain ? "继续核对" : "转存此条") { model.start(only: job.id) }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.running)
-                        Button("打开原链接") { openedJob = job }.buttonStyle(FlowButtonStyle(primary: false))
-                    }
-                    HStack {
-                        Button("导入已有分享") { importing = job }
+                        Button { onCopy(result.shareText) } label: { Label("复制链接", systemImage: "doc.on.doc") }
+                            .buttonStyle(ChipStyle(tint: FlowStyle.accent))
                         Spacer()
-                        if job.checkpoint != nil { Button("重置任务", role: .destructive) { resetJob = job }.disabled(model.running) }
-                    }.font(.caption).frame(minHeight: 44)
+                        ShareLink(item: result.shareText) { Image(systemName: "square.and.arrow.up").font(.subheadline.weight(.semibold)).frame(width: 44, height: 44) }
+                            .accessibilityLabel("分享新链接")
+                    }
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(FlowStyle.success.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(FlowStyle.success.opacity(0.2), lineWidth: 1))
+            }
+            if let error = job.error {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(job.status == .uncertain ? FlowStyle.warning : FlowStyle.danger)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !compact && job.status != .done && job.status != .running {
+                HStack(spacing: 10) {
+                    Button(job.status == .uncertain ? "继续核对" : "转存此条", action: onStart)
+                        .buttonStyle(FlowButtonStyle(primary: true)).disabled(running)
+                    Button("打开原链接", action: onOpen).buttonStyle(FlowButtonStyle(primary: false))
+                }
+                HStack {
+                    Button("导入已有分享", action: onImport).buttonStyle(ChipStyle())
+                    Spacer()
+                    if job.checkpoint != nil {
+                        Button("重置任务", role: .destructive, action: onReset).buttonStyle(ChipStyle(tint: FlowStyle.danger)).disabled(running)
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 22, style: .continuous).fill(FlowStyle.cardFill))
+        .orbitBorder(cornerRadius: 22, active: job.status == .running)
+    }
+}
+
+// MARK: - 工作台
+
+struct DeskPage: View {
+    @ObservedObject var model: WorkspaceModel
+    @Binding var accountDisk: Disk?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        PageScaffold(.desk) {
+            HeroPanel(pending: model.pending.count, completed: model.completed, connected: model.connectedCount).riseIn(1)
+            AccountBand(accounts: model.accounts) { accountDisk = $0 }.riseIn(2)
+            importCard.riseIn(3)
+            detected
+            NoticeBanner(text: model.notice)
+            actionArea
+        }
+        .animation(reduceMotion ? nil : .spring(response: 0.45, dampingFraction: 0.86), value: model.running)
+    }
+
+    private var importCard: some View {
+        FlowCard {
+            HStack(alignment: .top) {
+                SectionTitle(index: "01", title: "导入素材", subtitle: "链接与文案，一次粘贴")
+                Spacer()
+                if model.detectedCount > 0 {
+                    Text("检测到 \(model.detectedCount) 条")
+                        .font(FlowStyle.mono)
+                        .foregroundStyle(FlowStyle.accent)
+                        .padding(.horizontal, 8).padding(.vertical, 5)
+                        .background(Capsule().fill(FlowStyle.accent.opacity(0.1)))
+                        .overlay(Capsule().strokeBorder(FlowStyle.accent.opacity(0.25), lineWidth: 1))
+                        .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: model.detectedCount > 0)
+            FlowEditor(title: "链接与文案", text: $model.source, height: 150, prompt: "粘贴夸克、迅雷、百度分享链接\n也支持带链接的整段文案…")
+            HStack(spacing: 10) {
+                PasteButton(payloadType: String.self) { if let text = $0.first { model.source = text } }
+                    .labelStyle(.titleAndIcon)
+                    .tint(FlowStyle.accent2)
+                    .buttonBorderShape(.roundedRectangle(radius: 13))
+                if !model.source.isEmpty {
+                    Button { Haptics.tap(); model.source = "" } label: { Image(systemName: "xmark") }
+                        .buttonStyle(FlowButtonStyle(primary: false))
+                        .accessibilityLabel("清空素材")
+                }
+                Spacer(minLength: 8)
+                Button { Haptics.tap(); model.identify() } label: { Label("识别链接", systemImage: "viewfinder") }
+                    .buttonStyle(FlowButtonStyle(primary: true))
+                    .disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+    }
+
+    @ViewBuilder private var detected: some View {
+        HStack(alignment: .firstTextBaseline) {
+            SectionTitle(index: "02", title: "本次识别", subtitle: "成功记录也保留显示，避免重复转存")
+            Spacer()
+            Text("\(model.importedJobs.count)")
+                .font(.system(size: 24, weight: .bold, design: .rounded).monospacedDigit())
+                .foregroundStyle(FlowStyle.accentGradient)
+                .contentTransition(.numericText())
+                .animation(.spring(response: 0.4, dampingFraction: 0.8), value: model.importedJobs.count)
+        }
+        if model.importedJobs.isEmpty {
+            EmptyState(title: "还没有识别链接", detail: "粘贴素材，开始你的第一条内容流。", symbol: "tray")
+        } else {
+            HStack(spacing: 8) {
+                Button("全选") { Haptics.select(); withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { model.selectAll(true) } }.buttonStyle(ChipStyle())
+                Button("取消全选") { Haptics.select(); withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) { model.selectAll(false) } }.buttonStyle(ChipStyle())
+                Spacer()
+                Text("已选 \(model.selected.count)").font(.caption.monospacedDigit()).foregroundStyle(FlowStyle.muted)
+            }
+            .disabled(model.running)
+            LazyVStack(spacing: 12) {
+                ForEach(model.importedJobs) { job in
+                    TaskRow(
+                        job: job,
+                        compact: job.status != .done,
+                        running: model.running,
+                        onToggle: {
+                            Haptics.select()
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) { model.update(job.id) { $0.selected.toggle() } }
+                        },
+                        onCopy: { text in UIPasteboard.general.string = text; model.notice = "分享链接已复制。"; Haptics.success() }
+                    )
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .bottom)))
                 }
             }
         }
     }
-    private var copyStudio: some View {
-        VStack(alignment: .leading, spacing: 20) {
+
+    @ViewBuilder private var actionArea: some View {
+        if model.running {
             FlowCard {
-                section("内容焕新", subtitle: "保留原文事实，换一种表达")
-                Picker("文案阶段", selection: $copyStage) { ForEach(["原文", "改写稿", "发布稿"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-                if copyStage == "原文" {
-                    editor("原文", text: $model.original, height: 230, prompt: "粘贴要改写的原文与分享链接…")
-                    Button("导入工作台素材") { model.original = model.source }.buttonStyle(FlowButtonStyle(primary: false))
-                } else if copyStage == "改写稿" { editor("改写稿", text: $model.draft, height: 260, prompt: "生成后的文案显示在这里，可继续编辑。") }
-                else { editor("发布稿", text: $model.output, height: 260, prompt: "成功转存后自动更新发布稿。") }
+                HStack(spacing: 14) {
+                    ProgressRing(progress: model.batchTotal == 0 ? 0 : Double(model.batchDone) / Double(model.batchTotal))
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("正在转存并生成分享链接").font(.subheadline.weight(.semibold))
+                        Text("\(model.batchDone)/\(model.batchTotal) · 请保持 App 在前台").font(.caption.monospacedDigit()).foregroundStyle(FlowStyle.muted)
+                    }
+                    Spacer(minLength: 0)
+                }
+                ScanLine()
+                Button(model.stopRequested ? "将在当前任务完成后停止" : "完成当前任务后停止") { Haptics.tap(); model.stopRequested = true }
+                    .buttonStyle(FlowButtonStyle(primary: false))
+                    .disabled(model.stopRequested)
             }
-            FlowCard {
-                section("改写偏好", subtitle: model.modelID.isEmpty ? "请先在设置中连接模型" : "当前模型 · " + model.modelID)
-                Picker("文案语气", selection: $model.tone) { ForEach(["自然分享", "简洁直给", "内容推荐"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-                if !model.models.isEmpty { Picker("选择模型", selection: $model.modelID) { ForEach(model.models, id: \.self) { Text($0) } }.tint(FlowStyle.accent) }
-                Button { model.rewrite(); copyStage = "发布稿" } label: { HStack { if model.rewriting { ProgressView() }; Label(model.rewriting ? "正在生成文案" : "AI 改写文案", systemImage: "sparkles"); Spacer() } }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.rewriting || model.original.isEmpty)
-                Label("转存成功后自动换成你的链接", systemImage: "checkmark.circle.fill").font(.caption).foregroundStyle(FlowStyle.success)
+            .orbitBorder(cornerRadius: 22)
+            .transition(.opacity.combined(with: .scale(scale: 0.97)))
+        } else {
+            Button { Haptics.tap(); model.start() } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "bolt.horizontal.fill")
+                    Text("批量转存并生成链接")
+                    Spacer(minLength: 4)
+                    if !model.selected.isEmpty {
+                        Text("\(model.selected.count)")
+                            .font(.system(size: 13, weight: .bold, design: .rounded).monospacedDigit())
+                            .padding(.horizontal, 8).padding(.vertical, 3)
+                            .background(Capsule().fill(FlowStyle.ink.opacity(0.18)))
+                    }
+                    Image(systemName: "arrow.up.right")
+                }
+                .frame(maxWidth: .infinity)
             }
-            notice(model.copyNotice)
-            Button { UIPasteboard.general.string = model.output; model.copyNotice = "发布稿已复制。" } label: { HStack { Label("复制发布稿", systemImage: "doc.on.doc"); Spacer(); Image(systemName: "arrow.up.right") } }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.output.isEmpty)
+            .buttonStyle(FlowButtonStyle(.hero))
+            .disabled(model.selected.isEmpty)
+            .transition(.opacity)
         }
     }
-    private var settings: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            section("网盘账号", subtitle: "登录后直接转存，无需部署服务器")
-            accountBand
-            FlowCard {
-                section("AI 模型中转站", subtitle: "兼容 OpenAI 接口，模型自由选择")
-                labeledField("API 地址", prompt: "https://你的中转站/v1", text: $model.modelBase)
-                VStack(alignment: .leading, spacing: 8) { Text("API Key").font(.caption).foregroundStyle(FlowStyle.muted); SecureField("输入密钥", text: $model.modelKey).textInputAutocapitalization(.never).autocorrectionDisabled().padding(14).background(FlowStyle.background, in: RoundedRectangle(cornerRadius: 12)) }
-                Button { model.loadModels() } label: { Label(model.loadingModels ? "正在读取模型…" : "连接并读取模型", systemImage: "arrow.clockwise") }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.loadingModels)
-                if !model.models.isEmpty { Picker("当前模型", selection: $model.modelID) { ForEach(model.models, id: \.self) { Text($0) } } }
-                labeledField("模型名称（也可手动填写）", prompt: "输入中转站中的模型 ID", text: $model.modelID)
-                Button("保存模型设置") { do { try model.saveModelSettings(); model.modelNotice = "模型配置已保存。" } catch { model.modelNotice = error.localizedDescription } }.buttonStyle(FlowButtonStyle(primary: false))
-                notice(model.modelNotice)
+}
+
+// MARK: - 任务
+
+struct TasksPage: View {
+    @ObservedObject var model: WorkspaceModel
+    @Binding var filter: String
+    @Binding var openedJob: ShareJob?
+    @Binding var importing: ShareJob?
+    @Binding var resetJob: ShareJob?
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let visible = model.jobs.filter { filter == "全部" || (filter == "成功" && $0.status == .done) || (filter == "需处理" && [.ready, .failed, .uncertain].contains($0.status)) }
+        PageScaffold(.tasks) {
+            HStack(spacing: 10) {
+                MetricTile(title: "全部任务", value: model.jobs.count, tint: FlowStyle.accent2)
+                MetricTile(title: "已成功", value: model.completed, tint: FlowStyle.success)
+                MetricTile(title: "需处理", value: model.needsActionCount, tint: FlowStyle.warning)
             }
-            FlowCard {
-                Label("你的内容，留在你的手机", systemImage: "lock.shield").font(.subheadline.bold())
-                Text("账号凭证保存在系统钥匙串。任务与草稿保存在本机；调用 AI 时才将文案发送给你配置的中转站。").font(.caption).foregroundStyle(FlowStyle.muted).lineSpacing(5)
+            .riseIn(1)
+            FlowSegmented(options: ["全部", "成功", "需处理"], selection: $filter).riseIn(2)
+            if visible.isEmpty {
+                EmptyState(title: "这里暂时没有任务", detail: "处理过的链接将保存在本机。", symbol: "checklist").riseIn(3)
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(visible) { job in
+                        TaskRow(
+                            job: job,
+                            compact: false,
+                            running: model.running,
+                            onCopy: { text in UIPasteboard.general.string = text; model.notice = "分享链接已复制。"; Haptics.success() },
+                            onStart: { Haptics.tap(); model.start(only: job.id) },
+                            onOpen: { openedJob = job },
+                            onImport: { importing = job },
+                            onReset: { resetJob = job }
+                        )
+                        .contextMenu {
+                            Button { UIPasteboard.general.string = job.originalURL; model.notice = "原链接已复制。" } label: { Label("复制原链接", systemImage: "link") }
+                            if let result = job.result, job.status == .done {
+                                Button { UIPasteboard.general.string = result.shareText; model.notice = "分享链接已复制。" } label: { Label("复制新链接", systemImage: "doc.on.doc") }
+                            }
+                            if !model.running && job.status != .running && job.status != .uncertain {
+                                Button(role: .destructive) { model.remove(job) } label: { Label("删除本机记录", systemImage: "trash") }
+                            }
+                        }
+                        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.97)))
+                    }
+                }
+                .animation(reduceMotion ? nil : .spring(response: 0.4, dampingFraction: 0.85), value: filter)
             }
-            Text("CloudFlow 0.3.1 · PHONE FIRST").font(.caption2.monospaced()).foregroundStyle(FlowStyle.muted).frame(maxWidth: .infinity).padding(.top, 8)
+            NoticeBanner(text: model.notice)
+            if !model.jobs.isEmpty {
+                Text("长按任务卡片可复制链接或删除本机记录").font(.caption2).foregroundStyle(FlowStyle.muted).frame(maxWidth: .infinity)
+            }
         }
     }
-    private func labeledField(_ title: String, prompt: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 8) { Text(title).font(.caption).foregroundStyle(FlowStyle.muted); TextField(prompt, text: text).textInputAutocapitalization(.never).autocorrectionDisabled().padding(14).background(FlowStyle.background, in: RoundedRectangle(cornerRadius: 12)) }
+}
+
+// MARK: - 文案
+
+struct CopyPage: View {
+    @ObservedObject var model: WorkspaceModel
+    @Binding var stage: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    private static let stages = ["原文", "改写稿", "发布稿"]
+
+    var body: some View {
+        PageScaffold(.copy) {
+            FlowCard {
+                SectionTitle(index: "01", title: "内容焕新", subtitle: "保留原文事实，换一种表达")
+                FlowSegmented(options: Self.stages, selection: $stage, marks: [!model.original.isEmpty, !model.draft.isEmpty, !model.output.isEmpty])
+                switch stage {
+                case "改写稿":
+                    FlowEditor(title: "改写稿", text: $model.draft, height: 260, prompt: "生成后的文案显示在这里，可继续编辑。")
+                case "发布稿":
+                    FlowEditor(title: "发布稿", text: $model.output, height: 260, prompt: "成功转存后自动更新发布稿。")
+                default:
+                    FlowEditor(title: "原文", text: $model.original, height: 230, prompt: "粘贴要改写的原文与分享链接…")
+                    Button { Haptics.tap(); model.original = model.source } label: { Label("导入工作台素材", systemImage: "square.and.arrow.down") }
+                        .buttonStyle(FlowButtonStyle(primary: false))
+                        .disabled(model.source.isEmpty)
+                }
+            }
+            .riseIn(1)
+            FlowCard {
+                SectionTitle(index: "02", title: "改写偏好", subtitle: model.modelID.isEmpty ? "请先在设置中连接模型" : "当前模型 · " + model.modelID)
+                FlowSegmented(options: ["自然分享", "简洁直给", "内容推荐"], selection: $model.tone)
+                if !model.models.isEmpty {
+                    HStack {
+                        Text("选择模型").font(.caption.weight(.medium)).foregroundStyle(FlowStyle.muted)
+                        Spacer()
+                        Picker("选择模型", selection: $model.modelID) { ForEach(model.models, id: \.self) { Text($0) } }
+                            .pickerStyle(.menu)
+                            .tint(FlowStyle.accent)
+                    }
+                }
+                Button { Haptics.tap(); model.rewrite() } label: {
+                    HStack(spacing: 8) {
+                        if model.rewriting { ProgressView().tint(FlowStyle.ink) } else { Image(systemName: "sparkles") }
+                        Text(model.rewriting ? "正在生成文案…" : "AI 改写文案")
+                        Spacer(minLength: 4)
+                        Image(systemName: "wand.and.stars")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(FlowButtonStyle(.hero))
+                .overlay { if model.rewriting { ShimmerOverlay(cornerRadius: 18) } }
+                .disabled(model.rewriting || model.original.isEmpty)
+                Label("转存成功后自动换成你的链接", systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(FlowStyle.success)
+            }
+            .riseIn(2)
+            NoticeBanner(text: model.copyNotice)
+            Button { UIPasteboard.general.string = model.output; model.copyNotice = "发布稿已复制。"; Haptics.success() } label: {
+                HStack { Label("复制发布稿", systemImage: "doc.on.doc"); Spacer(); Image(systemName: "arrow.up.right") }.frame(maxWidth: .infinity)
+            }
+            .buttonStyle(FlowButtonStyle(.hero))
+            .disabled(model.output.isEmpty)
+            .riseIn(3)
+        }
+        // Switch to the publication only after a rewrite actually succeeded.
+        .onChange(of: model.rewriteCount) { _ in
+            withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.82)) { stage = "发布稿" }
+        }
     }
-    private func section(_ title: String, subtitle: String) -> some View {
-        VStack(alignment: .leading, spacing: 5) { Text(title).font(.headline).accessibilityAddTraits(.isHeader); Text(subtitle).font(.caption).foregroundStyle(FlowStyle.muted).fixedSize(horizontal: false, vertical: true) }
-    }
-    private func editor(_ title: String, text: Binding<String>, height: CGFloat, prompt: String) -> some View {
-        ZStack(alignment: .topLeading) {
-            if text.wrappedValue.isEmpty { Text(prompt).font(.subheadline).foregroundStyle(FlowStyle.muted.opacity(0.8)).padding(.horizontal, 14).padding(.top, 18).allowsHitTesting(false) }
-            TextEditor(text: text).font(.subheadline).lineSpacing(5).scrollContentBackground(.hidden).padding(8).frame(minHeight: height).accessibilityLabel(title)
-        }.background(FlowStyle.background.opacity(0.8), in: RoundedRectangle(cornerRadius: 14)).overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(FlowStyle.border) }
-    }
-    private func empty(_ title: String, detail: String, symbol: String) -> some View {
-        FlowCard { VStack(spacing: 10) { Image(systemName: symbol).font(.title).foregroundStyle(FlowStyle.accent.opacity(0.6)); Text(title).font(.subheadline.bold()); Text(detail).font(.caption).foregroundStyle(FlowStyle.muted) }.frame(maxWidth: .infinity).padding(.vertical, 20) }
-    }
-    @ViewBuilder private func notice(_ text: String) -> some View { if !text.isEmpty { Label(text, systemImage: "info.circle").font(.caption).foregroundStyle(FlowStyle.muted).fixedSize(horizontal: false, vertical: true) } }
-    private func status(_ value: ShareJob.Status) -> String {
-        switch value { case .ready: return "待转存"; case .running: return "执行中"; case .done: return "已完成"; case .failed: return "需重试"; case .uncertain: return "待核对" }
+}
+
+// MARK: - 设置
+
+struct SettingsPage: View {
+    @ObservedObject var model: WorkspaceModel
+    @Binding var accountDisk: Disk?
+    @AppStorage(FlowStyle.lowMotionKey) private var lowMotion = false
+
+    var body: some View {
+        PageScaffold(.settings) {
+            VStack(alignment: .leading, spacing: 14) {
+                SectionTitle(index: "01", title: "网盘账号", subtitle: "登录后直接转存，无需部署服务器")
+                AccountBand(accounts: model.accounts) { accountDisk = $0 }
+            }
+            .riseIn(1)
+            FlowCard {
+                SectionTitle(index: "02", title: "AI 模型中转站", subtitle: "兼容 OpenAI 接口，模型自由选择")
+                FlowField(title: "API 地址", prompt: "https://你的中转站/v1", text: $model.modelBase)
+                FlowField(title: "API Key", prompt: "输入密钥", text: $model.modelKey, secure: true)
+                Button { Haptics.tap(); model.loadModels() } label: {
+                    HStack(spacing: 8) {
+                        if model.loadingModels { ProgressView().tint(FlowStyle.ink) } else { Image(systemName: "arrow.clockwise") }
+                        Text(model.loadingModels ? "正在读取模型…" : "连接并读取模型")
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(FlowButtonStyle(primary: true))
+                .disabled(model.loadingModels)
+                if !model.models.isEmpty {
+                    HStack {
+                        Text("当前模型").font(.caption.weight(.medium)).foregroundStyle(FlowStyle.muted)
+                        Spacer()
+                        Picker("当前模型", selection: $model.modelID) { ForEach(model.models, id: \.self) { Text($0) } }
+                            .pickerStyle(.menu)
+                            .tint(FlowStyle.accent)
+                    }
+                }
+                FlowField(title: "模型名称（也可手动填写）", prompt: "输入中转站中的模型 ID", text: $model.modelID)
+                Button {
+                    do { try model.saveModelSettings(); model.modelNotice = "模型配置已保存。"; Haptics.success() }
+                    catch { model.modelNotice = error.localizedDescription; Haptics.warning() }
+                } label: { Text("保存模型设置").frame(maxWidth: .infinity) }
+                .buttonStyle(FlowButtonStyle(primary: false))
+                NoticeBanner(text: model.modelNotice)
+            }
+            .riseIn(2)
+            FlowCard {
+                SectionTitle(index: "03", title: "显示与性能", subtitle: "动态效果均为轻量动画；旧机型或省电时可一键关闭")
+                Toggle(isOn: $lowMotion) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("流畅优先").font(.subheadline.weight(.semibold))
+                        Text("关闭背景流光、边框扫描等循环动画").font(.caption).foregroundStyle(FlowStyle.muted)
+                    }
+                }
+                .tint(FlowStyle.accent)
+            }
+            .riseIn(3)
+            FlowCard {
+                HStack(spacing: 12) {
+                    FlowGlyph(symbol: "lock.shield.fill", color: FlowStyle.success, size: 36)
+                    Text("你的内容，留在你的手机").font(.subheadline.bold())
+                }
+                Text("账号凭证保存在系统钥匙串。任务与草稿保存在本机；调用 AI 时才将文案发送给你配置的中转站。")
+                    .font(.caption).foregroundStyle(FlowStyle.muted).lineSpacing(5)
+            }
+            .riseIn(4)
+            Text("CloudFlow 0.4.0 · PHONE FIRST")
+                .font(.caption2.monospaced())
+                .foregroundStyle(FlowStyle.muted)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 8)
+        }
     }
 }

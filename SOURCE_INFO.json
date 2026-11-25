@@ -1,0 +1,13 @@
+{
+  "version": "0.4.0",
+  "sourceFiles": 24,
+  "domainRegressionChecks": 34,
+  "providerFixtureChecks": 21,
+  "iosReleaseCompile": "pending (run GitHub Actions)",
+  "simulatorDebugCompile": "pending",
+  "workspaceSimulatorCheck": "pending",
+  "realAccountTransfer": "not executed",
+  "ipaIncluded": false,
+  "basedOn": "0.3.1 (6200f0de)",
+  "uiRedesign": "0.4.0 aurora/tech UI, custom tab bar, motion system, performance fixes"
+}

@@ -2,17 +2,25 @@ name: Build iOS IPA
 on:
   workflow_dispatch:
   push:
+    branches: [main]
     tags: ['v*']
 permissions:
   contents: read
+concurrency:
+  group: ios-ipa-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  APP_VERSION: 0.4.0
 jobs:
   ios-ipa:
     runs-on: macos-15
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - name: Check Xcode
-        run: xcodebuild -version
+        run: |
+          xcodebuild -version
+          swift --version
       - name: Link and checkpoint regression tests
         run: |
           swiftc App/Domain.swift Tests/DomainTests.swift -o "$RUNNER_TEMP/domain-tests"
@@ -22,25 +30,39 @@ jobs:
           swiftc App/Domain.swift App/Services.swift App/DriveAccount.swift App/DriveHTTP.swift App/DirectDrive.swift App/XunleiWebClient.swift App/BaiduSharePage.swift Tests/ProviderTests.swift -o "$RUNNER_TEMP/provider-tests"
           "$RUNNER_TEMP/provider-tests"
       - name: Install XcodeGen
-        run: brew install xcodegen
+        run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
       - name: Generate Xcode project
         run: xcodegen generate
       - name: Build unsigned iOS app
         run: |
           set -o pipefail
           xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/CloudFlowDerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee "$RUNNER_TEMP/ios-build.log"
+      - name: Show compile errors
+        if: failure()
+        run: grep -E "error:|warning: unable" "$RUNNER_TEMP/ios-build.log" | head -80 || true
       - name: Package unsigned IPA
         run: |
           APP="$RUNNER_TEMP/CloudFlowDerivedData/Build/Products/Release-iphoneos/CloudFlow.app"
           test -d "$APP"
           mkdir -p dist/Payload
           ditto "$APP" dist/Payload/CloudFlow.app
-          ditto -c -k --sequesterRsrc --keepParent dist/Payload dist/CloudFlow-unsigned.ipa
-          shasum -a 256 dist/CloudFlow-unsigned.ipa > dist/SHA256SUMS.txt
+          (cd dist && zip -qry "CloudFlow-${APP_VERSION}-unsigned.ipa" Payload)
+          rm -rf dist/Payload
+          shasum -a 256 dist/*.ipa > dist/SHA256SUMS.txt
+          cat dist/SHA256SUMS.txt
+      # Upload the IPA before the simulator checks so a flaky simulator never blocks delivery.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudFlow-${{ env.APP_VERSION }}-ipa
+          path: |
+            dist/*.ipa
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
       - name: Build simulator app
         run: |
-          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/simulator-build.log" 2>&1 || { tail -100 "$RUNNER_TEMP/simulator-build.log"; exit 1; }
-      - name: Launch simulator and capture UI
+          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/simulator-build.log" 2>&1 || { grep -E "error:" "$RUNNER_TEMP/simulator-build.log" | head -60; tail -60 "$RUNNER_TEMP/simulator-build.log"; exit 1; }
+      - name: Launch simulator, self-check and capture UI
         run: |
           DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if "iPhone" in x["name"]))')
           xcrun simctl boot "$DEVICE"
@@ -48,26 +70,25 @@ jobs:
           xcrun simctl status_bar "$DEVICE" override --time '9:41' --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState charged --batteryLevel 100
           xcrun simctl install "$DEVICE" "$RUNNER_TEMP/CloudFlowSimulator/Build/Products/Debug-iphonesimulator/CloudFlow.app"
           xcrun simctl launch "$DEVICE" app.cloudflow.personal --verify-workspace
-          sleep 3
+          sleep 4
           CONTAINER=$(xcrun simctl get_app_container "$DEVICE" app.cloudflow.personal data)
           cat "$CONTAINER/Documents/workspace-self-check.txt"
           xcrun simctl terminate "$DEVICE" app.cloudflow.personal
+          mkdir -p dist/screens
           for PAGE in desk tasks copy settings; do
             xcrun simctl launch "$DEVICE" app.cloudflow.personal --preview-page "$PAGE"
-            sleep 3
-            xcrun simctl io "$DEVICE" screenshot "dist/CloudFlow-$PAGE.png"
+            sleep 4
+            xcrun simctl io "$DEVICE" screenshot "dist/screens/CloudFlow-$PAGE.png"
             xcrun simctl spawn "$DEVICE" launchctl list | grep app.cloudflow.personal
             xcrun simctl terminate "$DEVICE" app.cloudflow.personal
           done
           xcrun simctl shutdown "$DEVICE"
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: CloudFlow-phone-direct-0.3.1
-          path: |
-            dist/CloudFlow-unsigned.ipa
-            dist/SHA256SUMS.txt
-            dist/CloudFlow-*.png
-          if-no-files-found: error
+          name: CloudFlow-${{ env.APP_VERSION }}-screens
+          path: dist/screens/*.png
+          if-no-files-found: ignore
           retention-days: 30
       - name: Upload diagnostics
         if: failure()
