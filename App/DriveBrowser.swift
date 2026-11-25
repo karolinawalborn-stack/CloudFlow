@@ -1,11 +1,12 @@
 import SwiftUI
 import WebKit
 
-@MainActor final class LoginSession: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+@MainActor final class LoginSession: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     @Published var notice = "完成网页登录后，点右上角保存并验证。"
     @Published var busy = false
     let disk: Disk
     let webView: WKWebView
+    private var observedHeaders: [String: String] = [:]
     init(_ disk: Disk, url: URL? = nil) {
         self.disk = disk
         let configuration = WKWebViewConfiguration()
@@ -13,9 +14,50 @@ import WebKit
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         webView.navigationDelegate = self; webView.uiDelegate = self
+        if disk == .xunlei {
+            let controller = configuration.userContentController
+            controller.add(WeakLoginHandler(self), name: "cloudflowSession")
+            controller.addUserScript(WKUserScript(source: Self.sessionObserver, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        }
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
         webView.allowsBackForwardNavigationGestures = true
         webView.load(URLRequest(url: url ?? disk.homeURL))
+    }
+    // The login page owns the session. Observe only its requests to the drive API,
+    // retain the known session headers in memory, and persist only on explicit Save.
+    private static let sessionObserver = #"""
+    (() => {
+      if (!(location.hostname === 'xunlei.com' || location.hostname.endsWith('.xunlei.com'))) return;
+      const allowed = ['authorization','x-client-id','x-device-id','x-captcha-token'];
+      const send = (url, headers) => {
+        try {
+          if (new URL(url, location.href).hostname !== 'api-pan.xunlei.com') return;
+          const out = {};
+          new Headers(headers || {}).forEach((value, key) => { if (allowed.includes(key)) out[key] = value; });
+          if (Object.keys(out).length) window.webkit.messageHandlers.cloudflowSession.postMessage(out);
+        } catch (_) {}
+      };
+      const originalFetch = window.fetch;
+      window.fetch = function(input, init) {
+        const headers = new Headers(input instanceof Request ? input.headers : {});
+        new Headers(init && init.headers || {}).forEach((value,key) => headers.set(key,value));
+        send(input instanceof Request ? input.url : input, headers);
+        return originalFetch.apply(this, arguments);
+      };
+      const open = XMLHttpRequest.prototype.open, set = XMLHttpRequest.prototype.setRequestHeader, start = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function(method,url) { this.__cfURL = url; this.__cfHeaders = {}; return open.apply(this,arguments); };
+      XMLHttpRequest.prototype.setRequestHeader = function(name,value) { if (allowed.includes(name.toLowerCase())) this.__cfHeaders[name.toLowerCase()] = value; return set.apply(this,arguments); };
+      XMLHttpRequest.prototype.send = function() { send(this.__cfURL,this.__cfHeaders); return start.apply(this,arguments); };
+    })()
+    """#
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        let host = message.frameInfo.securityOrigin.host
+        guard disk == .xunlei, message.frameInfo.isMainFrame,
+              host == "xunlei.com" || host.hasSuffix(".xunlei.com"),
+              let fields = message.body as? [String: String] else { return }
+        for key in ["authorization", "x-client-id", "x-device-id", "x-captcha-token"] {
+            if let value = fields[key], !value.isEmpty { observedHeaders[key] = value }
+        }
     }
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { notice = "页面加载失败，请刷新重试。" }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -63,6 +105,12 @@ import WebKit
                 account.deviceID = data["device_id"] ?? account.deviceID
             }
         }
+        if disk == .xunlei {
+            if let bearer = observedHeaders["authorization"], bearer.lowercased().hasPrefix("bearer ") { account.accessToken = String(bearer.dropFirst(7)) }
+            account.captchaToken = observedHeaders["x-captcha-token"] ?? account.captchaToken
+            account.deviceID = observedHeaders["x-device-id"] ?? account.deviceID
+            account.clientID = observedHeaders["x-client-id"] ?? account.clientID
+        }
         do {
             guard account.configured else { throw ServiceError("尚未读取到登录会话，请完成网页登录后重试。") }
             account.verifiedAt = nil; try account.save(disk)
@@ -70,6 +118,12 @@ import WebKit
             notice = "登录已验证，已保存在本机。"; return true
         } catch { notice = error.localizedDescription; return false }
     }
+}
+
+private final class WeakLoginHandler: NSObject, WKScriptMessageHandler {
+    weak var owner: LoginSession?
+    init(_ owner: LoginSession) { self.owner = owner }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) { owner?.userContentController(controller, didReceive: message) }
 }
 
 struct SessionWebView: UIViewRepresentable {
