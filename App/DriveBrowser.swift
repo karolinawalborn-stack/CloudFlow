@@ -46,7 +46,7 @@ import WebKit
               for (const storage of [localStorage, sessionStorage]) {
                 for (let i = 0; i < storage.length; i++) {
                   const key = storage.key(i);
-                  if (!/token|auth|user|client|device|captcha/i.test(key)) continue;
+                  if (!/token|auth|user|client|device|captcha|credential|session/i.test(key)) continue;
                   const value = storage.getItem(key);
                   if (fields.includes(key) && value) out[key] = value.replace(/^"|"$/g, '');
                   try { inspect(JSON.parse(value), 0); } catch (_) {}

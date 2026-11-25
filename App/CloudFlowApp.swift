@@ -11,7 +11,16 @@ struct Workspace: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
     @StateObject private var model = WorkspaceModel()
-    @State private var page = Page.desk
+    @State private var page = Self.initialPage()
+    private static func initialPage() -> Page {
+        #if DEBUG
+        let args = ProcessInfo.processInfo.arguments
+        if let i = args.firstIndex(of: "--preview-page"), i + 1 < args.count {
+            switch args[i + 1] { case "tasks": return .tasks; case "copy": return .copy; case "settings": return .settings; default: break }
+        }
+        #endif
+        return .desk
+    }
     @State private var accountDisk: Disk?
     @State private var openedJob: ShareJob?
     @State private var importing: ShareJob?

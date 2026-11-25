@@ -7,11 +7,11 @@ import Foundation
     let http: DriveHTTP
     private let quarkBase = "https://drive-pc.quark.cn/1/clouddrive"
     private let quarkQuery = ["pr": "ucpro", "fr": "pc", "uc_param_str": ""]
-    init(_ disk: Disk, account: DriveAccount? = nil) {
+    init(_ disk: Disk, account: DriveAccount? = nil, http: DriveHTTP? = nil) {
         self.disk = disk
         let loaded = account ?? DriveAccount.read(disk)
         self.account = loaded
-        self.http = DriveHTTP(disk: disk, account: loaded)
+        self.http = http ?? DriveHTTP(disk: disk, account: loaded)
     }
     func validate() async throws {
         defer { http.close() }

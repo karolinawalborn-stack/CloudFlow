@@ -123,7 +123,12 @@ import UIKit
         rewriting = true
         Task {
             defer { rewriting = false }
-            do { try saveModelSettings(); draft = try await Service.rewrite(input, tone: style, model: model, base: base, key: key); copyNotice = "改写完成，可编辑后替换链接。"; persistDraft() }
+            do {
+                try saveModelSettings()
+                let result = try await Service.rewrite(input, tone: style, model: model, base: base, key: key)
+                guard original == input else { copyNotice = "原文已更改，请重新生成改写。"; return }
+                draft = result; output = ""; copyNotice = "改写完成，可编辑后替换链接。"; persistDraft()
+            }
             catch { copyNotice = error.localizedDescription }
         }
     }

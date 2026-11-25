@@ -32,7 +32,7 @@ enum DriveJSON {
 
 final class DriveHTTP: NSObject, URLSessionTaskDelegate {
     let disk: Disk
-    private let configuration = URLSessionConfiguration.ephemeral
+    private let configuration: URLSessionConfiguration
     var storage: HTTPCookieStorage { configuration.httpCookieStorage! }
     private lazy var session: URLSession = {
         let config = configuration
@@ -41,7 +41,8 @@ final class DriveHTTP: NSObject, URLSessionTaskDelegate {
         config.timeoutIntervalForRequest = 40
         return URLSession(configuration: config, delegate: self, delegateQueue: nil)
     }()
-    init(disk: Disk, account: DriveAccount) {
+    init(disk: Disk, account: DriveAccount, configuration: URLSessionConfiguration = .ephemeral) {
+        self.configuration = configuration
         self.disk = disk
         super.init()
         for pair in account.cookie.split(separator: ";") {

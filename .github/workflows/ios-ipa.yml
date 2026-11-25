@@ -17,6 +17,10 @@ jobs:
         run: |
           swiftc App/Domain.swift Tests/DomainTests.swift -o "$RUNNER_TEMP/domain-tests"
           "$RUNNER_TEMP/domain-tests"
+      - name: Provider adapter regression tests
+        run: |
+          swiftc App/Domain.swift App/Services.swift App/DriveAccount.swift App/DriveHTTP.swift App/DirectDrive.swift Tests/ProviderTests.swift -o "$RUNNER_TEMP/provider-tests"
+          "$RUNNER_TEMP/provider-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
@@ -43,10 +47,13 @@ jobs:
           xcrun simctl bootstatus "$DEVICE" -b
           xcrun simctl status_bar "$DEVICE" override --time '9:41' --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState charged --batteryLevel 100
           xcrun simctl install "$DEVICE" "$RUNNER_TEMP/CloudFlowSimulator/Build/Products/Debug-iphonesimulator/CloudFlow.app"
-          xcrun simctl launch "$DEVICE" app.cloudflow.personal
-          sleep 4
-          xcrun simctl io "$DEVICE" screenshot dist/CloudFlow-workspace.png
-          xcrun simctl spawn "$DEVICE" launchctl list | grep app.cloudflow.personal
+          for PAGE in desk tasks copy settings; do
+            xcrun simctl launch "$DEVICE" app.cloudflow.personal --preview-page "$PAGE"
+            sleep 3
+            xcrun simctl io "$DEVICE" screenshot "dist/CloudFlow-$PAGE.png"
+            xcrun simctl spawn "$DEVICE" launchctl list | grep app.cloudflow.personal
+            xcrun simctl terminate "$DEVICE" app.cloudflow.personal
+          done
           xcrun simctl shutdown "$DEVICE"
       - uses: actions/upload-artifact@v4
         with:
@@ -54,7 +61,7 @@ jobs:
           path: |
             dist/CloudFlow-unsigned.ipa
             dist/SHA256SUMS.txt
-            dist/CloudFlow-workspace.png
+            dist/CloudFlow-*.png
           if-no-files-found: error
           retention-days: 30
       - name: Upload diagnostics
