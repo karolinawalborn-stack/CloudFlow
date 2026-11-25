@@ -5,300 +5,244 @@ import UIKit
     var body: some Scene { WindowGroup { Workspace().preferredColorScheme(.dark) } }
 }
 
-@MainActor struct Workspace: View {
-    enum Page: Hashable { case desk, tasks, copy, settings }
+struct Workspace: View {
+    enum Page: String, CaseIterable { case desk = "工作台", tasks = "任务", copy = "文案", settings = "设置" }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("transferBase") private var transferBase = ""
-    @AppStorage("modelBase") private var modelBase = ""
-    @AppStorage("modelID") private var modelID = ""
-    @State private var transferKey = Vault.read("transfer")
-    @State private var modelKey = Vault.read("model")
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @StateObject private var model = WorkspaceModel()
     @State private var page = Page.desk
-    @State private var source = ""
-    @State private var original = ""
-    @State private var draft = ""
-    @State private var output = ""
-    @State private var jobs = Self.restore()
-    @State private var providers: [Disk: Bool] = [:]
-    @State private var models: [String] = []
-    @State private var tone = "自然分享"
+    @State private var accountDisk: Disk?
+    @State private var openedJob: ShareJob?
+    @State private var importing: ShareJob?
+    @State private var resetJob: ShareJob?
     @State private var filter = "全部"
-    @State private var deskNotice = ""
-    @State private var taskNotice = ""
-    @State private var copyNotice = ""
-    @State private var transferNotice = ""
-    @State private var modelNotice = ""
-    @State private var running = false
-    @State private var completed = 0
-    @State private var total = 0
-    @State private var checking = false
-    @State private var loadingModels = false
-    @State private var rewriting = false
-    @State private var confirm = false
-    private let bg = Color(red: 0.063, green: 0.078, blue: 0.073)
-    private let panel = Color(red: 0.091, green: 0.115, blue: 0.102)
-    private let mint = Color(red: 0.65, green: 0.95, blue: 0.75)
-    private let muted = Color(red: 0.66, green: 0.72, blue: 0.68)
+    @State private var copyStage = "原文"
 
     var body: some View {
         TabView(selection: $page) {
-            screen("01 / TRANSFER DESK", "批量转存工作台") { desk }.tabItem { Label("工作台", systemImage: "tray") }.tag(Page.desk)
-            screen("02 / ACTIVITY", "任务") { activity }.tabItem { Label("任务", systemImage: "list.bullet.rectangle") }.tag(Page.tasks)
-            screen("03 / COPY STUDIO", "文案二创") { copyStudio }.tabItem { Label("文案", systemImage: "sparkles") }.tag(Page.copy)
-            screen("04 / CONNECTIONS", "连接设置") { settings }.tabItem { Label("设置", systemImage: "slider.horizontal.3") }.tag(Page.settings)
+            screen(.desk, eyebrow: "YOUR CONTENT, CONNECTED.") { desk }.tabItem { Label("工作台", systemImage: "square.grid.2x2.fill") }.tag(Page.desk)
+            screen(.tasks, eyebrow: "EVERY TRANSFER, IN VIEW.") { tasks }.tabItem { Label("任务", systemImage: "arrow.triangle.2.circlepath") }.tag(Page.tasks)
+            screen(.copy, eyebrow: "MAKE IT YOUR OWN.") { copyStudio }.tabItem { Label("文案", systemImage: "sparkles") }.tag(Page.copy)
+            screen(.settings, eyebrow: "CONNECTED, ON YOUR TERMS.") { settings }.tabItem { Label("设置", systemImage: "slider.horizontal.3") }.tag(Page.settings)
         }
-        .tint(mint)
-        .onChange(of: transferBase) { _ in providers = [:] }
-        .onChange(of: transferKey) { _ in providers = [:] }
-        .onChange(of: modelBase) { _ in models = []; modelID = "" }
-        .onChange(of: modelKey) { _ in models = []; modelID = "" }
+        .tint(FlowStyle.accent)
+        .sheet(item: $accountDisk) { disk in AccountSettings(disk: disk) { model.refreshAccounts() } }
+        .sheet(item: $openedJob) { job in DriveLogin(disk: job.disk, url: URL(string: job.originalURL)) { model.refreshAccounts() } }
+        .sheet(item: $importing) { job in ImportShare(job: job) { model.importResult($0, for: job) } }
+        .alert("已在网盘核对？", isPresented: Binding(get: { resetJob != nil }, set: { if !$0 { resetJob = nil } })) {
+            Button("取消", role: .cancel) { resetJob = nil }
+            Button("确认重置并重新转存", role: .destructive) { if let job = resetJob { model.reset(job) }; resetJob = nil }
+        } message: { Text("重置将清除断点，下次重新发起转存。若网盘内已有文件，请先导入已有分享链接，避免重复。") }
+        .onChange(of: scenePhase) { phase in if phase != .active { model.persistDraft() } }
+        .onChange(of: page) { _ in model.persistDraft() }
     }
-
-    private func screen<V: View>(_ index: String, _ title: String, @ViewBuilder content: () -> V) -> some View {
+    private func screen<V: View>(_ page: Page, eyebrow: String, @ViewBuilder content: () -> V) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Label("CloudFlow", systemImage: "checkmark.icloud").font(.headline).foregroundStyle(mint)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(index).font(.caption.monospaced()).foregroundStyle(mint)
-                    Text(title).font(.largeTitle.weight(.semibold)).accessibilityAddTraits(.isHeader)
+            VStack(alignment: .leading, spacing: 24) {
+                HStack {
+                    HStack(spacing: 8) {
+                        Image(systemName: "square.stack.3d.up.fill").foregroundStyle(FlowStyle.accent)
+                        Text("CloudFlow").font(.headline)
+                    }
+                    Spacer()
+                    Label("本机直连", systemImage: "iphone").font(.caption.weight(.medium)).foregroundStyle(FlowStyle.muted)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(eyebrow).font(.caption2.weight(.semibold)).tracking(2).foregroundStyle(FlowStyle.accent)
+                    Text(page.rawValue).font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
                 }
                 content()
-            }.frame(maxWidth: 620, alignment: .leading).padding(.horizontal, 18).padding(.vertical, 21).frame(maxWidth: .infinity)
-        }.background(bg.ignoresSafeArea()).scrollDismissesKeyboard(.interactively)
+            }.frame(maxWidth: 680, alignment: .leading).padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 28).frame(maxWidth: .infinity)
+        }
+        .background(FlowBackdrop().ignoresSafeArea())
+        .foregroundStyle(FlowStyle.text)
+        .scrollDismissesKeyboard(.interactively)
+        .toolbarBackground(FlowStyle.background, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
     }
-
     private var desk: some View {
-        VStack(alignment: .leading, spacing: 13) {
+        VStack(alignment: .leading, spacing: 24) {
+            hero
             accountBand
-            Divider()
-            HStack { heading("分享链接与文案"); Spacer(); Text("\(jobs.count) 条已识别").font(.caption.monospacedDigit()).foregroundStyle(muted) }
-            editor("分享链接与文案", $source, height: 145)
-            HStack {
-                PasteButton(payloadType: String.self) { if let text = $0.first { source = text } }.tint(mint)
-                Spacer()
-                action("识别链接", "link", primary: true) { importLinks() }.disabled(running || source.isEmpty)
-            }
-            notice(deskNotice)
-            Divider()
-            heading("转存队列")
-            if jobs.allSatisfy({ $0.status != .ready }) { Text("没有待转存任务").font(.footnote).foregroundStyle(muted) }
-            ForEach($jobs) { $job in
-                if job.status == .ready {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Toggle(isOn: $job.selected) { jobLabel(job) }.disabled(running)
-                        TextField("提取码（可选）", text: $job.code).textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .font(.footnote).padding(.vertical, 6).disabled(running)
-                        Divider()
-                    }
+            FlowCard {
+                HStack { section("导入素材", subtitle: "链接与文案，一次粘贴"); Spacer(); Image(systemName: "arrow.down.doc").foregroundStyle(FlowStyle.accent) }
+                editor("链接与文案", text: $model.source, height: 145, prompt: "粘贴夸克、迅雷、百度分享链接\n也支持带链接的整段文案…")
+                HStack {
+                    PasteButton(payloadType: String.self) { if let text = $0.first { model.source = text } }.labelStyle(.titleAndIcon).tint(FlowStyle.accent)
+                    Spacer(minLength: 8)
+                    Button { model.identify() } label: { Label("识别链接", systemImage: "viewfinder") }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-            if running { ProgressView(value: Double(completed), total: Double(max(1, total))) { Text("已处理 \(completed) / \(total)").font(.footnote.monospacedDigit()) } }
-            action("开始转存并生成分享", "arrow.down.to.line", primary: true) { confirm = true }
-                .disabled(running || !jobs.contains { $0.selected && $0.status == .ready })
-            if !taskNotice.isEmpty { notice(taskNotice) }
-        }
-        .confirmationDialog("转存到各自平台账号并创建分享？", isPresented: $confirm, titleVisibility: .visible) {
-            Button("开始转存") { batch() }
-            Button("取消", role: .cancel) {}
-        } message: { Text("将把选中的资源转存到服务中配置的目录，并创建分享链接。") }
-    }
-
-    private var accountBand: some View {
-        HStack(spacing: 6) {
-            ForEach(Disk.allCases) { disk in
-                VStack(alignment: .leading, spacing: 4) {
-                    Label(disk.title, systemImage: "externaldrive").font(.subheadline.weight(.semibold)).foregroundStyle(.white)
-                    Text(providers[disk] == true ? "已配置" : (providers[disk] == false ? "未配置" : "未检查"))
-                        .font(.caption2).foregroundStyle(providers[disk] == true ? mint : muted)
-                }.frame(maxWidth: .infinity, alignment: .leading).padding(8)
-                    .background(panel, in: RoundedRectangle(cornerRadius: 8))
+            HStack { section("待转存", subtitle: "同平台转存到自己的账号"); Spacer(); Text("\(model.pending.count)").font(.title3.monospacedDigit().bold()).foregroundStyle(FlowStyle.accent) }
+            if model.pending.isEmpty { empty("还没有待转存链接", detail: "粘贴素材，开始你的第一条内容流。", symbol: "tray") }
+            else {
+                HStack {
+                    Button("全选") { model.selectAll(true) }
+                    Text("/").foregroundStyle(FlowStyle.muted)
+                    Button("取消全选") { model.selectAll(false) }
+                    Spacer(); Text("已选 \(model.selected.count)").font(.caption).foregroundStyle(FlowStyle.muted)
+                }.font(.subheadline).frame(minHeight: 44)
+                ForEach(model.pending) { job in taskCard(job, compact: true).transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .bottom))) }
+            }
+            notice(model.notice)
+            if model.running {
+                FlowCard {
+                    HStack { ProgressView().tint(FlowStyle.accent); Text("正在转存并生成分享链接").font(.subheadline.weight(.medium)); Spacer() }
+                    Button(model.stopRequested ? "将在当前任务完成后停止" : "完成当前任务后停止") { model.stopRequested = true }.buttonStyle(FlowButtonStyle(primary: false)).disabled(model.stopRequested)
+                }
+            } else {
+                Button { model.start() } label: { HStack { Text("批量转存并生成链接"); Spacer(); Image(systemName: "arrow.up.right") }.frame(maxWidth: .infinity) }
+                    .buttonStyle(FlowButtonStyle(primary: true)).disabled(model.selected.isEmpty)
             }
         }
     }
-
-    private var activity: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("任务筛选", selection: $filter) { ForEach(["全部", "成功", "需处理"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-            let visible = jobs.filter { filter == "全部" || (filter == "成功" && $0.status == .done) || (filter == "需处理" && [.failed, .uncertain].contains($0.status)) }
-            if visible.isEmpty { Text("暂无此类任务").font(.footnote).foregroundStyle(muted) }
-            ForEach(visible) { job in
+    private var hero: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack { jobLabel(job); Spacer(); Text(label(job.status)).font(.caption).foregroundStyle(job.status == .done ? mint : muted) }
-                    if let result = job.result {
-                        Text(result.shareText).font(.caption).foregroundStyle(mint).textSelection(.enabled)
-                        action("复制分享", "doc.on.doc") { UIPasteboard.general.string = result.shareText; taskNotice = "已复制分享链接" }
-                    }
-                    if let error = job.error { notice(error) }
-                    if job.status == .failed {
-                        action("返回队列", "arrow.uturn.backward") { update(job.id) { $0.status = .ready; $0.error = nil }; page = .desk }.disabled(running)
-                    }
-                    if job.status == .uncertain {
-                        action("查询这次请求结果", "arrow.clockwise") { recover(job) }.disabled(running)
-                    }
-                    Divider()
+                    Text("好内容，\n即刻变成你的分享。").font(.title2.weight(.bold)).lineSpacing(5)
+                    Text("批量转存 · 链接焕新 · AI 文案").font(.caption).foregroundStyle(FlowStyle.muted)
                 }
+                Spacer(minLength: 4)
+                Image(systemName: "arrow.triangle.branch").font(.system(size: 42, weight: .light)).foregroundStyle(FlowStyle.accent).rotationEffect(.degrees(-90)).padding(.top, 8).accessibilityHidden(true)
             }
-            notice(taskNotice)
+            HStack(spacing: 0) {
+                metric("待处理", value: String(model.pending.count))
+                Divider().overlay(FlowStyle.border)
+                metric("已完成", value: String(model.completed))
+                Divider().overlay(FlowStyle.border)
+                metric("已连接", value: "\(model.accounts.values.filter { $0 }.count)/3")
+            }.fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(22)
+        .background(LinearGradient(colors: [Color(red: 0.08, green: 0.20, blue: 0.22), FlowStyle.surface], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 24))
+        .overlay { RoundedRectangle(cornerRadius: 24).strokeBorder(FlowStyle.accent.opacity(0.2)) }
+    }
+    private func metric(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) { Text(value).font(.title2.monospacedDigit().weight(.semibold)); Text(title).font(.caption2).foregroundStyle(FlowStyle.muted) }.frame(maxWidth: .infinity, alignment: .center)
+    }
+    private var accountBand: some View {
+        LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: typeSize.isAccessibilitySize ? 1 : 3), spacing: 10) {
+            ForEach(Disk.allCases) { disk in
+                Button { accountDisk = disk } label: {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack { FlowGlyph(symbol: FlowStyle.diskIcon(disk), color: FlowStyle.diskColor(disk), size: 34); Spacer(minLength: 0) }
+                        Text(disk.title).font(.subheadline.bold()).foregroundStyle(FlowStyle.text)
+                        HStack(spacing: 4) { Circle().fill(model.accounts[disk] == true ? FlowStyle.success : FlowStyle.muted).frame(width: 5, height: 5); Text(model.accounts[disk] == true ? "已连接" : "点击登录").font(.caption2).foregroundStyle(FlowStyle.muted) }
+                    }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(FlowStyle.surface, in: RoundedRectangle(cornerRadius: 18)).overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(FlowStyle.border) }
+                }.buttonStyle(.plain).accessibilityLabel(disk.title + (model.accounts[disk] == true ? "已连接，管理账号" : "登录账号"))
+            }
         }
     }
-
+    private var tasks: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack { section("任务记录", subtitle: "成功与中断，都有迹可循"); Spacer(); Text("\(model.completed)/\(model.jobs.count)").font(.headline.monospacedDigit()).foregroundStyle(FlowStyle.accent) }
+            Picker("任务筛选", selection: $filter) { ForEach(["全部", "成功", "需处理"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
+            let visible = model.jobs.filter { filter == "全部" || (filter == "成功" && $0.status == .done) || (filter == "需处理" && [.ready, .failed, .uncertain].contains($0.status)) }
+            if visible.isEmpty { empty("这里暂时没有任务", detail: "处理过的链接将保存在本机。", symbol: "checklist") }
+            ForEach(visible) { taskCard($0, compact: false) }
+            notice(model.notice)
+        }
+    }
+    private func taskCard(_ job: ShareJob, compact: Bool) -> some View {
+        FlowCard {
+            HStack(spacing: 12) {
+                if compact {
+                    Button { model.update(job.id) { $0.selected.toggle() } } label: { Image(systemName: job.selected ? "checkmark.circle.fill" : "circle").font(.title3).frame(width: 44, height: 44).foregroundStyle(job.selected ? FlowStyle.accent : FlowStyle.muted) }.disabled(model.running).accessibilityLabel(job.selected ? "取消选择任务" : "选择任务")
+                } else { FlowGlyph(symbol: FlowStyle.diskIcon(job.disk), color: FlowStyle.diskColor(job.disk)) }
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(job.result?.title.isEmpty == false ? job.result!.title : job.disk.title + "分享").font(.subheadline.bold()).lineLimit(2)
+                    Text(job.originalURL).font(.caption2).foregroundStyle(FlowStyle.muted).lineLimit(1).truncationMode(.middle)
+                }
+                Spacer(minLength: 4)
+                if job.status == .running { ProgressView().tint(FlowStyle.accent) }
+                else { Text(status(job.status)).font(.caption2.weight(.semibold)).foregroundStyle(job.status == .done ? FlowStyle.success : job.status == .uncertain ? FlowStyle.warning : FlowStyle.muted) }
+            }
+            if let result = job.result, job.status == .done {
+                Text(result.shareText).font(.caption).foregroundStyle(FlowStyle.accent).textSelection(.enabled)
+                HStack {
+                    Button { UIPasteboard.general.string = result.shareText; model.notice = "分享链接已复制。" } label: { Label("复制链接", systemImage: "doc.on.doc") }
+                    Spacer()
+                    ShareLink(item: result.shareText) { Image(systemName: "square.and.arrow.up").frame(width: 44, height: 44) }.accessibilityLabel("分享新链接")
+                }.font(.subheadline.weight(.medium))
+            }
+            if let error = job.error { Text(error).font(.caption).foregroundStyle(FlowStyle.warning).fixedSize(horizontal: false, vertical: true) }
+            if job.status != .done && !compact {
+                if job.status != .running {
+                    HStack {
+                        Button(job.status == .uncertain ? "继续核对" : "转存此条") { model.start(only: job.id) }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.running)
+                        Button("打开原链接") { openedJob = job }.buttonStyle(FlowButtonStyle(primary: false))
+                    }
+                    HStack {
+                        Button("导入已有分享") { importing = job }
+                        Spacer()
+                        if job.checkpoint != nil { Button("重置任务", role: .destructive) { resetJob = job }.disabled(model.running) }
+                    }.font(.caption).frame(minHeight: 44)
+                }
+            }
+        }
+    }
     private var copyStudio: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            heading("原文")
-            editor("原文", $original, height: 120)
-            action("导入工作台原文", "square.and.arrow.down") { original = source }
-            Divider()
-            heading("改写稿")
-            Picker("语气", selection: $tone) { ForEach(["自然分享", "简洁直给", "内容推荐"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
-            if !models.isEmpty { Picker("模型", selection: $modelID) { ForEach(models, id: \.self) { Text($0) } } }
-            else { Text(modelID.isEmpty ? "未选择模型" : modelID).font(.footnote).foregroundStyle(muted) }
-            action(rewriting ? "正在生成" : "调用模型改写", "sparkles", primary: true) { rewrite() }.disabled(rewriting || original.isEmpty)
-            editor("改写稿", $draft, height: 125)
-            action("替换链接并预览", "link") {
-                let result = ShareText.rewriteLinks(draft.isEmpty ? original : draft, using: jobs)
-                output = result.text; copyNotice = "替换了 \(result.count) 处链接，未成功的原链接保留。"
-            }.disabled(original.isEmpty && draft.isEmpty)
-            heading("发布稿")
-            editor("发布稿", $output, height: 120)
-            action("复制发布稿", "doc.on.doc") { UIPasteboard.general.string = output; copyNotice = "已复制发布稿" }.disabled(output.isEmpty)
-            notice(copyNotice)
-        }
-    }
-
-    private var settings: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            heading("网盘转存服务")
-            field("网盘服务 HTTPS 地址", $transferBase)
-            secret("网盘服务密钥", $transferKey)
-            action(checking ? "检查中" : "保存并检查服务", "externaldrive") { check() }.disabled(checking || running)
-            accountBand
-            notice(transferNotice)
-            Divider()
-            heading("文案模型中转站")
-            field("API 基址（通常以 /v1 结尾）", $modelBase)
-            secret("模型 API Key", $modelKey)
-            action(loadingModels ? "读取中" : "保存并读取模型", "arrow.clockwise") { loadModels() }.disabled(loadingModels)
-            if !models.isEmpty { Picker("使用模型", selection: $modelID) { ForEach(models, id: \.self) { Text($0) } } }
-            notice(modelNotice)
-        }
-    }
-
-    private func heading(_ value: String) -> some View { Text(value).font(.headline).accessibilityAddTraits(.isHeader) }
-    @ViewBuilder private func notice(_ value: String) -> some View { if !value.isEmpty { Text(value).font(.footnote).foregroundStyle(muted).fixedSize(horizontal: false, vertical: true) } }
-    private func editor(_ title: String, _ value: Binding<String>, height: CGFloat) -> some View {
-        TextEditor(text: value).font(.body).scrollContentBackground(.hidden).padding(6).frame(minHeight: height)
-            .background(panel, in: RoundedRectangle(cornerRadius: 8)).accessibilityLabel(title)
-    }
-    private func field(_ title: String, _ value: Binding<String>) -> some View {
-        TextField(title, text: value).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-            .padding(.horizontal, 10).frame(minHeight: 44).background(panel, in: RoundedRectangle(cornerRadius: 8))
-    }
-    private func secret(_ title: String, _ value: Binding<String>) -> some View {
-        SecureField(title, text: value).textInputAutocapitalization(.never).autocorrectionDisabled()
-            .padding(.horizontal, 10).frame(minHeight: 44).background(panel, in: RoundedRectangle(cornerRadius: 8))
-    }
-    private func action(_ title: String, _ symbol: String, primary: Bool = false, run: @escaping () -> Void) -> some View {
-        Button(action: run) { Label(title, systemImage: symbol).font(.subheadline.weight(.semibold)).padding(.horizontal, 7).frame(minHeight: 36) }
-            .buttonStyle(.borderedProminent).tint(primary ? mint : panel).foregroundStyle(primary ? bg : mint)
-            .controlSize(.regular)
-    }
-    private func jobLabel(_ job: ShareJob) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(job.result?.title.isEmpty == false ? (job.result?.title ?? job.disk.title) : job.disk.title + "网盘").font(.subheadline.weight(.medium))
-            Text(job.originalURL).font(.caption).foregroundStyle(muted).lineLimit(1).truncationMode(.middle)
-        }
-    }
-    private func label(_ status: ShareJob.Status) -> String {
-        switch status { case .ready: return "待转存"; case .running: return "运行中"; case .done: return "已生成"; case .failed: return "未执行"; case .uncertain: return "待核对" }
-    }
-    private func importLinks() {
-        var seen = Set(jobs.map(\.originalURL))
-        let fresh = ShareText.parse(source).filter { seen.insert($0.originalURL).inserted }
-        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { jobs.append(contentsOf: fresh) }
-        deskNotice = fresh.isEmpty ? "没有新增的有效分享链接。" : "新增 \(fresh.count) 条。"
-        persist()
-    }
-    private func batch() {
-        let selected = jobs.filter { $0.selected && $0.status == .ready }
-        guard !running, !selected.isEmpty, !transferBase.isEmpty && !transferKey.isEmpty else { taskNotice = "请先配置网盘转存服务。"; return }
-        let base = transferBase, key = transferKey
-        running = true; completed = 0; total = selected.count; taskNotice = ""
-        Task {
-            for job in selected {
-                update(job.id) { $0.status = .running }
-                do {
-                    let result = try await Service.transfer(job, base: base, key: key)
-                    update(job.id) { $0.status = .done; $0.result = result; $0.error = nil }
-                } catch {
-                    update(job.id) { $0.status = (error as? ServiceError)?.uncertain == true ? .uncertain : .failed; $0.error = error.localizedDescription }
-                }
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.18)) { completed += 1 }
+        VStack(alignment: .leading, spacing: 20) {
+            FlowCard {
+                section("内容焕新", subtitle: "保留原文事实，换一种表达")
+                Picker("文案阶段", selection: $copyStage) { ForEach(["原文", "改写稿", "发布稿"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
+                if copyStage == "原文" {
+                    editor("原文", text: $model.original, height: 230, prompt: "粘贴要改写的原文与分享链接…")
+                    Button("导入工作台素材") { model.original = model.source }.buttonStyle(FlowButtonStyle(primary: false))
+                } else if copyStage == "改写稿" { editor("改写稿", text: $model.draft, height: 260, prompt: "生成后的文案显示在这里，可继续编辑。") }
+                else { editor("发布稿", text: $model.output, height: 260, prompt: "替换成功链接后，复制发布稿。") }
             }
-            running = false
-            let ids = Set(selected.map(\.id))
-            let successes = jobs.filter { ids.contains($0.id) && $0.status == .done }.count
-            taskNotice = "生成 \(successes) 条分享；\(selected.count - successes) 条需处理。"
+            FlowCard {
+                section("改写偏好", subtitle: model.modelID.isEmpty ? "请先在设置中连接模型" : "当前模型 · " + model.modelID)
+                Picker("文案语气", selection: $model.tone) { ForEach(["自然分享", "简洁直给", "内容推荐"], id: \.self) { Text($0) } }.pickerStyle(.segmented)
+                if !model.models.isEmpty { Picker("选择模型", selection: $model.modelID) { ForEach(model.models, id: \.self) { Text($0) } }.tint(FlowStyle.accent) }
+                Button { model.rewrite(); copyStage = "改写稿" } label: { HStack { if model.rewriting { ProgressView() }; Label(model.rewriting ? "正在生成文案" : "AI 改写文案", systemImage: "sparkles"); Spacer() } }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.rewriting || model.original.isEmpty)
+                Button { model.replaceLinks(); copyStage = "发布稿" } label: { Label("替换为我的分享链接", systemImage: "link") }.buttonStyle(FlowButtonStyle(primary: false)).disabled(model.original.isEmpty && model.draft.isEmpty)
+            }
+            notice(model.copyNotice)
+            Button { UIPasteboard.general.string = model.output; model.copyNotice = "发布稿已复制。" } label: { HStack { Label("复制发布稿", systemImage: "doc.on.doc"); Spacer(); Image(systemName: "arrow.up.right") } }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.output.isEmpty)
         }
     }
-    private func recover(_ job: ShareJob) {
-        guard !running, !transferBase.isEmpty, !transferKey.isEmpty else { taskNotice = "请先配置网盘转存服务。"; return }
-        let base = transferBase, key = transferKey
-        running = true
-        Task {
-            defer { running = false }
-            do {
-                let result = try await Service.lookup(job, base: base, key: key)
-                update(job.id) { $0.status = .done; $0.result = result; $0.error = nil }
-                taskNotice = "已取回分享结果。"
-            } catch { taskNotice = error.localizedDescription }
+    private var settings: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            section("网盘账号", subtitle: "登录后直接转存，无需部署服务器")
+            accountBand
+            FlowCard {
+                section("AI 模型中转站", subtitle: "兼容 OpenAI 接口，模型自由选择")
+                labeledField("API 地址", prompt: "https://你的中转站/v1", text: $model.modelBase)
+                VStack(alignment: .leading, spacing: 8) { Text("API Key").font(.caption).foregroundStyle(FlowStyle.muted); SecureField("输入密钥", text: $model.modelKey).textInputAutocapitalization(.never).autocorrectionDisabled().padding(14).background(FlowStyle.background, in: RoundedRectangle(cornerRadius: 12)) }
+                Button { model.loadModels() } label: { Label(model.loadingModels ? "正在读取模型…" : "连接并读取模型", systemImage: "arrow.clockwise") }.buttonStyle(FlowButtonStyle(primary: true)).disabled(model.loadingModels)
+                if !model.models.isEmpty { Picker("当前模型", selection: $model.modelID) { ForEach(model.models, id: \.self) { Text($0) } } }
+                labeledField("模型名称（也可手动填写）", prompt: "输入中转站中的模型 ID", text: $model.modelID)
+                Button("保存模型设置") { do { try model.saveModelSettings(); model.modelNotice = "模型配置已保存。" } catch { model.modelNotice = error.localizedDescription } }.buttonStyle(FlowButtonStyle(primary: false))
+                notice(model.modelNotice)
+            }
+            FlowCard {
+                Label("你的内容，留在你的手机", systemImage: "lock.shield").font(.subheadline.bold())
+                Text("账号凭证保存在系统钥匙串。任务与草稿保存在本机；调用 AI 时才将文案发送给你配置的中转站。").font(.caption).foregroundStyle(FlowStyle.muted).lineSpacing(5)
+            }
+            Text("CloudFlow 0.3.0 · PHONE FIRST").font(.caption2.monospaced()).foregroundStyle(FlowStyle.muted).frame(maxWidth: .infinity).padding(.top, 8)
         }
     }
-    private func check() {
-        let base = transferBase, key = transferKey; checking = true
-        Task {
-            defer { checking = false }
-            do {
-                let states = try await Service.status(base: base, key: key)
-                guard base == transferBase && key == transferKey else { return }
-                guard Vault.write(key, to: "transfer") else { transferNotice = "钥匙串写入失败，密钥仅在本次打开时可用。"; return }
-                providers = states; transferNotice = "已读取服务配置；账号实际有效性以转存结果为准。"
-            } catch { transferNotice = error.localizedDescription }
-        }
+    private func labeledField(_ title: String, prompt: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 8) { Text(title).font(.caption).foregroundStyle(FlowStyle.muted); TextField(prompt, text: text).textInputAutocapitalization(.never).autocorrectionDisabled().padding(14).background(FlowStyle.background, in: RoundedRectangle(cornerRadius: 12)) }
     }
-    private func loadModels() {
-        let base = modelBase, key = modelKey; loadingModels = true
-        Task {
-            defer { loadingModels = false }
-            do {
-                let list = try await Service.models(base: base, key: key)
-                guard base == modelBase && key == modelKey else { return }
-                models = list; if !list.contains(modelID) { modelID = list.first ?? "" }
-                modelNotice = Vault.write(key, to: "model") ? "读取到 \(list.count) 个模型。" : "钥匙串写入失败，密钥仅在本次打开时可用。"
-            } catch { modelNotice = error.localizedDescription }
-        }
+    private func section(_ title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) { Text(title).font(.headline).accessibilityAddTraits(.isHeader); Text(subtitle).font(.caption).foregroundStyle(FlowStyle.muted).fixedSize(horizontal: false, vertical: true) }
     }
-    private func rewrite() {
-        guard !modelID.isEmpty else { copyNotice = "请先在设置中读取并选择模型。"; return }
-        let input = original, base = modelBase, key = modelKey, model = modelID, style = tone
-        rewriting = true
-        Task {
-            defer { rewriting = false }
-            do { draft = try await Service.rewrite(input, tone: style, model: model, base: base, key: key); copyNotice = "改写稿已生成。" }
-            catch { copyNotice = error.localizedDescription }
-        }
+    private func editor(_ title: String, text: Binding<String>, height: CGFloat, prompt: String) -> some View {
+        ZStack(alignment: .topLeading) {
+            if text.wrappedValue.isEmpty { Text(prompt).font(.subheadline).foregroundStyle(FlowStyle.muted.opacity(0.8)).padding(.horizontal, 14).padding(.top, 18).allowsHitTesting(false) }
+            TextEditor(text: text).font(.subheadline).lineSpacing(5).scrollContentBackground(.hidden).padding(8).frame(minHeight: height).accessibilityLabel(title)
+        }.background(FlowStyle.background.opacity(0.8), in: RoundedRectangle(cornerRadius: 14)).overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(FlowStyle.border) }
     }
-    private func update(_ id: UUID, edit: (inout ShareJob) -> Void) {
-        guard let i = jobs.firstIndex(where: { $0.id == id }) else { return }
-        edit(&jobs[i]); persist()
+    private func empty(_ title: String, detail: String, symbol: String) -> some View {
+        FlowCard { VStack(spacing: 10) { Image(systemName: symbol).font(.title).foregroundStyle(FlowStyle.accent.opacity(0.6)); Text(title).font(.subheadline.bold()); Text(detail).font(.caption).foregroundStyle(FlowStyle.muted) }.frame(maxWidth: .infinity).padding(.vertical, 20) }
     }
-    private static var stateURL: URL { URL.documentsDirectory.appendingPathComponent("cloudflow-jobs.json") }
-    private func persist() {
-        do { try JSONEncoder().encode(jobs).write(to: Self.stateURL, options: [.atomic, .completeFileProtection]) }
-        catch { taskNotice = "任务记录未能写入手机。" }
-    }
-    private static func restore() -> [ShareJob] {
-        guard let data = try? Data(contentsOf: stateURL), var records = try? JSONDecoder().decode([ShareJob].self, from: data) else { return [] }
-        for i in records.indices where records[i].status == .running { records[i].status = .uncertain; records[i].error = "上次请求中断，请查询结果。" }
-        return records
+    @ViewBuilder private func notice(_ text: String) -> some View { if !text.isEmpty { Label(text, systemImage: "info.circle").font(.caption).foregroundStyle(FlowStyle.muted).fixedSize(horizontal: false, vertical: true) } }
+    private func status(_ value: ShareJob.Status) -> String {
+        switch value { case .ready: return "待转存"; case .running: return "执行中"; case .done: return "已完成"; case .failed: return "需重试"; case .uncertain: return "待核对" }
     }
 }

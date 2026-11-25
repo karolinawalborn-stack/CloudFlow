@@ -74,30 +74,6 @@ struct Service {
         return result
     }
 
-    static func status(base: String, key: String) async throws -> [Disk: Bool] {
-        let health = try await request(Health.self, base: base, path: "/api/v1/status", token: key)
-        return Dictionary(uniqueKeysWithValues: Disk.allCases.map { ($0, health.providers[$0.rawValue] ?? false) })
-    }
-
-    static func transfer(_ job: ShareJob, base: String, key: String) async throws -> TransferResult {
-        let input = TransferInput(id: job.id.uuidString, url: job.originalURL, code: job.code)
-        let result = try await request(TransferResult.self, base: base, path: "/api/v1/transfers", token: key,
-                                       body: try JSONEncoder().encode(input), isTransfer: true)
-        return try verified(result, for: job)
-    }
-
-    static func lookup(_ job: ShareJob, base: String, key: String) async throws -> TransferResult {
-        let result = try await request(TransferResult.self, base: base, path: "/api/v1/transfers/" + job.id.uuidString,
-                                       token: key, isTransfer: true)
-        return try verified(result, for: job)
-    }
-
-    private static func verified(_ result: TransferResult, for job: ShareJob) throws -> TransferResult {
-        guard let url = URLComponents(string: result.shareURL), url.scheme?.lowercased() == "https", url.host?.lowercased() == job.disk.host,
-              url.user == nil, url.password == nil, url.port == nil else { throw ServiceError("服务未返回有效的新分享链接。", uncertain: true) }
-        return result
-    }
-
     static func models(base: String, key: String) async throws -> [String] {
         let response = try await request(ModelList.self, base: base, path: "/models", token: key)
         return Set(response.data.map(\.id).filter { !$0.isEmpty }).sorted()
@@ -130,8 +106,6 @@ struct Service {
     }
 
     private struct Failure: Decodable { let error: String; let uncertain: Bool? }
-    private struct Health: Decodable { let providers: [String: Bool] }
-    private struct TransferInput: Encodable { let id: String; let url: String; let code: String }
     private struct ModelList: Decodable { struct Model: Decodable { let id: String }; let data: [Model] }
     private struct Message: Codable { let role: String; let content: String? }
     private struct ChatInput: Encodable { let model: String; let messages: [Message] }

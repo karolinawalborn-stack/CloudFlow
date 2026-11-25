@@ -5,6 +5,7 @@ enum Disk: String, Codable, CaseIterable, Identifiable {
     var id: String { rawValue }
     var title: String { switch self { case .quark: return "夸克"; case .xunlei: return "迅雷"; case .baidu: return "百度" } }
     var host: String { switch self { case .quark: return "pan.quark.cn"; case .xunlei: return "pan.xunlei.com"; case .baidu: return "pan.baidu.com" } }
+    var homeURL: URL { URL(string: "https://" + host + "/")! }
 }
 
 struct ShareJob: Codable, Identifiable {
@@ -17,6 +18,17 @@ struct ShareJob: Codable, Identifiable {
     var status = Status.ready
     var result: TransferResult?
     var error: String?
+    var checkpoint: TransferCheckpoint?
+}
+
+// A durable checkpoint is written before every remote mutation.
+struct TransferCheckpoint: Codable {
+    enum Stage: String, Codable { case saving, saved, sharing, complete }
+    var stage: Stage
+    var taskID = ""
+    var savedIDs: [String] = []
+    var title = ""
+    var shareID = ""
 }
 
 struct TransferResult: Codable {
@@ -37,6 +49,11 @@ enum ShareText {
     private static let suffixCode = try! NSRegularExpression(pattern: #"^[\s,，;；:：）)】—-]*(?:提取码|访问码|密码)\s*[:：]?\s*([A-Za-z0-9]{1,12})(?![A-Za-z0-9])"#)
     private static let identifier = try! NSRegularExpression(pattern: #"^/s/[A-Za-z0-9_-]+$"#)
 
+    static func identity(_ link: String) -> String {
+        guard let url = URLComponents(string: link) else { return link }
+        return (url.host?.lowercased() ?? "") + url.percentEncodedPath
+    }
+
     static func parse(_ text: String) -> [ShareJob] {
         var seen = Set<String>()
         return captures(text).compactMap { item in
@@ -44,20 +61,20 @@ enum ShareText {
                   let disk = Disk.allCases.first(where: { $0.host == parts.host?.lowercased() }),
                   parts.user == nil, parts.password == nil, parts.port == nil,
                   identifier.firstMatch(in: parts.percentEncodedPath, range: NSRange(parts.percentEncodedPath.startIndex..., in: parts.percentEncodedPath)) != nil,
-                  seen.insert(item.link).inserted else { return nil }
-            let code = parts.queryItems?.first(where: { $0.name.lowercased() == "pwd" })?.value ?? item.code
+                  seen.insert(identity(item.link)).inserted else { return nil }
+            let code = parts.queryItems?.first(where: { ["pwd", "pass_code", "password"].contains($0.name.lowercased()) })?.value ?? item.code
             return ShareJob(id: UUID(), originalURL: item.link, disk: disk, code: code)
         }
     }
 
     static func rewriteLinks(_ text: String, using jobs: [ShareJob]) -> (text: String, count: Int) {
         var mapping: [String: TransferResult] = [:]
-        for job in jobs where job.status == .done { if let result = job.result { mapping[job.originalURL] = result } }
+        for job in jobs where job.status == .done { if let result = job.result { mapping[identity(job.originalURL)] = result } }
         let source = text as NSString
         let output = NSMutableString(string: text)
         var count = 0
         for item in captures(text).reversed() {
-            guard let result = mapping[item.link] else { continue }
+            guard let result = mapping[identity(item.link)] else { continue }
             if let codeRange = item.codeRange {
                 if result.code.isEmpty {
                     let end = NSMaxRange(codeRange)
@@ -68,6 +85,14 @@ enum ShareText {
             count += 1
         }
         return (String(output), count)
+    }
+
+    static func importedShare(_ text: String, for original: ShareJob) -> TransferResult? {
+        let links = parse(text)
+        guard links.count == 1, let new = links.first, new.disk == original.disk,
+              let path = URLComponents(string: new.originalURL)?.percentEncodedPath,
+              path != URLComponents(string: original.originalURL)?.percentEncodedPath else { return nil }
+        return TransferResult(shareURL: new.originalURL, code: new.code, title: "")
     }
 
     private struct Capture { let link: String; let range: NSRange; let code: String; let codeRange: NSRange? }

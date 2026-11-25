@@ -1,52 +1,30 @@
 name: Build iOS IPA
-
 on:
   workflow_dispatch:
   push:
-    tags:
-      - 'v*'
-
+    tags: ['v*']
 permissions:
   contents: read
-
 jobs:
-  server-tests:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.23.x'
-          cache: false
-      - run: go mod tidy
-      - run: go test -race ./...
-
   ios-ipa:
     runs-on: macos-15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Check Xcode
         run: xcodebuild -version
+      - name: Link and checkpoint regression tests
+        run: |
+          swiftc App/Domain.swift Tests/DomainTests.swift -o "$RUNNER_TEMP/domain-tests"
+          "$RUNNER_TEMP/domain-tests"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate Xcode project
         run: xcodegen generate
       - name: Build unsigned iOS app
-        run: >-
-          xcodebuild
-          -project CloudFlow.xcodeproj
-          -scheme CloudFlow
-          -configuration Release
-          -sdk iphoneos
-          -destination 'generic/platform=iOS'
-          -derivedDataPath "$RUNNER_TEMP/CloudFlowDerivedData"
-          CODE_SIGNING_ALLOWED=NO
-          CODE_SIGNING_REQUIRED=NO
-          CODE_SIGN_IDENTITY=""
-          build
+        run: |
+          set -o pipefail
+          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/CloudFlowDerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee "$RUNNER_TEMP/ios-build.log"
       - name: Package unsigned IPA
         run: |
           APP="$RUNNER_TEMP/CloudFlowDerivedData/Build/Products/Release-iphoneos/CloudFlow.app"
@@ -54,9 +32,36 @@ jobs:
           mkdir -p dist/Payload
           ditto "$APP" dist/Payload/CloudFlow.app
           ditto -c -k --sequesterRsrc --keepParent dist/Payload dist/CloudFlow-unsigned.ipa
+          shasum -a 256 dist/CloudFlow-unsigned.ipa > dist/SHA256SUMS.txt
+      - name: Build simulator app
+        run: |
+          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/simulator-build.log" 2>&1 || { tail -100 "$RUNNER_TEMP/simulator-build.log"; exit 1; }
+      - name: Launch simulator and capture UI
+        run: |
+          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for devices in d["devices"].values() for x in devices if "iPhone" in x["name"]))')
+          xcrun simctl boot "$DEVICE"
+          xcrun simctl bootstatus "$DEVICE" -b
+          xcrun simctl status_bar "$DEVICE" override --time '9:41' --dataNetwork wifi --wifiMode active --wifiBars 3 --batteryState charged --batteryLevel 100
+          xcrun simctl install "$DEVICE" "$RUNNER_TEMP/CloudFlowSimulator/Build/Products/Debug-iphonesimulator/CloudFlow.app"
+          xcrun simctl launch "$DEVICE" app.cloudflow.personal
+          sleep 4
+          xcrun simctl io "$DEVICE" screenshot dist/CloudFlow-workspace.png
+          xcrun simctl spawn "$DEVICE" launchctl list | grep app.cloudflow.personal
+          xcrun simctl shutdown "$DEVICE"
       - uses: actions/upload-artifact@v4
         with:
-          name: CloudFlow-unsigned-ipa
-          path: dist/CloudFlow-unsigned.ipa
+          name: CloudFlow-phone-direct-0.3
+          path: |
+            dist/CloudFlow-unsigned.ipa
+            dist/SHA256SUMS.txt
+            dist/CloudFlow-workspace.png
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: |
+            ${{ runner.temp }}/ios-build.log
+            ${{ runner.temp }}/simulator-build.log
