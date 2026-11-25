@@ -39,7 +39,8 @@ jobs:
           xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/CloudFlowDerivedData" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee "$RUNNER_TEMP/ios-build.log"
       - name: Show compile errors
         if: failure()
-        run: grep -E "error:|warning: unable" "$RUNNER_TEMP/ios-build.log" | head -80 || true
+        run: |
+          grep -E "error:|warning: unable" "$RUNNER_TEMP/ios-build.log" | head -80 || true
       - name: Package unsigned IPA
         run: |
           APP="$RUNNER_TEMP/CloudFlowDerivedData/Build/Products/Release-iphoneos/CloudFlow.app"
