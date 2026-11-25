@@ -80,28 +80,20 @@ struct Service {
     }
 
     static func rewrite(_ source: String, tone: String, model: String, base: String, key: String) async throws -> String {
-        var protected = source
-        var tokens: [(String, String)] = []
-        var originalLinks = Set<String>()
-        let prefix = "CF" + String(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8))
-        for job in ShareText.parse(source) where originalLinks.insert(job.originalURL).inserted {
-            let marker = "[\(prefix)_\(tokens.count + 1)]"
-            protected = protected.replacingOccurrences(of: job.originalURL, with: marker)
-            tokens.append((marker, job.originalURL))
-        }
+        let protected = ShareText.protect(source)
         let input = ChatInput(model: model, messages: [
             Message(role: "system", content: "改写为中文推广文案，语气：\(tone)。保留事实和所有 CF 占位符，不增造链接、不编造福利，输出正文。"),
-            Message(role: "user", content: protected)
+            Message(role: "user", content: protected.text)
         ])
         let reply = try await request(ChatReply.self, base: base, path: "/chat/completions", token: key,
                                       body: try JSONEncoder().encode(input))
         guard var draft = reply.choices.first?.message.content, !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ServiceError("模型没有返回可用正文。")
         }
-        for (marker, link) in tokens {
-            guard draft.contains(marker) else { throw ServiceError("模型遗漏了网盘链接位置，已保留原文。请重试或直接替换链接。") }
-            draft = draft.replacingOccurrences(of: marker, with: link)
+        guard let restored = protected.restore(draft) else {
+            throw ServiceError("模型遗漏或重复了链接位置，已保留原文，请重试。")
         }
+        draft = restored
         return draft
     }
 

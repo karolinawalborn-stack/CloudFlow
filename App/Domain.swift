@@ -54,6 +54,35 @@ enum ShareText {
         return (url.host?.lowercased() ?? "") + url.percentEncodedPath
     }
 
+    struct ProtectedText {
+        let text: String
+        let replacements: [(marker: String, original: String)]
+        func restore(_ draft: String) -> String? {
+            var restored = draft
+            for pair in replacements {
+                guard restored.components(separatedBy: pair.marker).count == 2 else { return nil }
+                restored = restored.replacingOccurrences(of: pair.marker, with: pair.original)
+            }
+            return restored
+        }
+    }
+
+    static func protect(_ text: String) -> ProtectedText {
+        let supported = Set(parse(text).map { identity($0.originalURL) })
+        let source = text as NSString
+        let output = NSMutableString(string: text)
+        let prefix = "CF" + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        var replacements: [(marker: String, original: String)] = []
+        for item in captures(text).reversed() where supported.contains(identity(item.link)) {
+            let end = item.codeRange.map { NSMaxRange($0) } ?? NSMaxRange(item.range)
+            let range = NSRange(location: item.range.location, length: end - item.range.location)
+            let marker = "[" + prefix + "_" + String(replacements.count) + "]"
+            replacements.append((marker, source.substring(with: range)))
+            output.replaceCharacters(in: range, with: marker)
+        }
+        return ProtectedText(text: String(output), replacements: replacements)
+    }
+
     static func parse(_ text: String) -> [ShareJob] {
         var seen = Set<String>()
         return captures(text).compactMap { item in

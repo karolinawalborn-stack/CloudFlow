@@ -121,7 +121,9 @@ import Foundation
         if point == nil {
             let id = URL(string: job.originalURL)!.lastPathComponent
             if !job.code.isEmpty {
-                _ = try await http.json("https://pan.baidu.com/share/verify", query: common.merging(["surl": id.hasPrefix("1") ? String(id.dropFirst()) : id]) { _, new in new }, form: ["pwd": job.code, "vcode": "", "vcode_str": ""])
+                let verified = try await http.json("https://pan.baidu.com/share/verify", query: common.merging(["surl": id.hasPrefix("1") ? String(id.dropFirst()) : id]) { _, new in new }, form: ["pwd": job.code, "vcode": "", "vcode_str": ""])
+                let randsk = DriveJSON.string(verified, "randsk")
+                if !randsk.isEmpty, let cookie = HTTPCookie(properties: [.domain: ".pan.baidu.com", .path: "/", .name: "BDCLND", .value: randsk.removingPercentEncoding ?? randsk, .secure: "TRUE"]) { http.storage.setCookie(cookie) }
             }
             let raw = try await http.raw("https://pan.baidu.com/s/" + id)
             let html = String(decoding: raw, as: UTF8.self)
@@ -155,7 +157,17 @@ import Foundation
         return TransferResult(shareURL: try DriveJSON.require(shared, "link", uncertain: true), code: password, title: point!.title)
     }
     private func refreshXunlei() async throws {
-        if !account.accessToken.isEmpty { return }
+        if !account.accessToken.isEmpty {
+            let parts = account.accessToken.split(separator: ".")
+            if parts.count > 1 {
+                var payload = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+                payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+                if let data = Data(base64Encoded: payload), let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let expiry = claims["exp"] as? Double, expiry <= Date().timeIntervalSince1970 + 60 {
+                    account.accessToken = ""
+                }
+            }
+            if !account.accessToken.isEmpty { return }
+        }
         guard !account.refreshToken.isEmpty else { throw ServiceError("请在迅雷页面完成登录并保存会话。") }
         let token = try await http.json("https://xluser-ssl.xunlei.com/v1/auth/token", body: ["client_id": account.clientID, "grant_type": "refresh_token", "refresh_token": account.refreshToken])
         account.accessToken = try DriveJSON.require(token, "access_token")

@@ -31,6 +31,11 @@ import Foundation
         check(roundtrip.checkpoint?.savedIDs == ["new1", "new2"], "Persist all identifiers")
         let link = TransferResult(shareURL: "https://pan.baidu.com/s/new?pwd=old&x=1", code: "next", title: "").shareText
         check(URLComponents(string: link)?.queryItems?.filter { $0.name == "pwd" }.map(\.value) == ["next"], "No duplicate code")
+        let protected = ShareText.protect(sample)
+        check(!protected.text.contains("QWER"), "Protect extraction codes from rewrite")
+        check(protected.restore(protected.text) == sample, "Restore original URL and code exactly")
+        check(protected.restore("missing all markers") == nil, "Reject dropped markers")
+        check(protected.restore(protected.text + protected.replacements[0].marker) == nil, "Reject repeated marker")
         print("PASS: \(count) domain regression checks")
     }
 }

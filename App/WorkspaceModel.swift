@@ -53,7 +53,7 @@ import UIKit
     func identify() {
         var seen = Set(jobs.map { ShareText.identity($0.originalURL) })
         let fresh = ShareText.parse(source).filter { seen.insert(ShareText.identity($0.originalURL)).inserted }
-        withAnimation(.easeOut(duration: 0.22)) { jobs.insert(contentsOf: fresh, at: 0) }
+        withAnimation(UIAccessibility.isReduceMotionEnabled ? nil : .easeOut(duration: 0.22)) { jobs.insert(contentsOf: fresh, at: 0) }
         notice = fresh.isEmpty ? "没有新增的有效分享链接。" : "已识别 \(fresh.count) 条链接，选好后开始转存。"
         if original.isEmpty { original = source }
         do { try persistJobs() } catch { notice = "任务保存失败，请重试。" }
