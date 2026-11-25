@@ -1,0 +1,62 @@
+name: Build iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  server-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - run: go mod tidy
+      - run: go test -race ./...
+
+  ios-ipa:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Xcode
+        run: xcodebuild -version
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Build unsigned iOS app
+        run: >-
+          xcodebuild
+          -project CloudFlow.xcodeproj
+          -scheme CloudFlow
+          -configuration Release
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/CloudFlowDerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_REQUIRED=NO
+          CODE_SIGN_IDENTITY=""
+          build
+      - name: Package unsigned IPA
+        run: |
+          APP="$RUNNER_TEMP/CloudFlowDerivedData/Build/Products/Release-iphoneos/CloudFlow.app"
+          test -d "$APP"
+          mkdir -p dist/Payload
+          ditto "$APP" dist/Payload/CloudFlow.app
+          ditto -c -k --sequesterRsrc --keepParent dist/Payload dist/CloudFlow-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CloudFlow-unsigned-ipa
+          path: dist/CloudFlow-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

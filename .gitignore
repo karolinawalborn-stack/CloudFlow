@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+*.xcuserstate
+xcuserdata/
+DerivedData/
+*.xcodeproj/
+server/data/
+server/*.tmp
+dist/
