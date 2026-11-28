@@ -10,6 +10,10 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - name: Select stable Xcode and simulator runtime
+        run: |
+          sudo xcode-select -s /Applications/Xcode_16.4.app/Contents/Developer
+          xcodebuild -version
       - name: Quark login callback regression
         run: node Tests/QuarkLoginTests.js
       - name: Link and workspace regressions
@@ -34,8 +38,10 @@ jobs:
         run: |
           xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/simulator-build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/simulator-build.log"; exit 1; }
       - name: Simulator self-check and screenshots
+        timeout-minutes: 7
         run: |
-          DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; groups=json.load(sys.stdin)["devices"]; keys=sorted(groups, key=lambda k: tuple(int(x) for x in k.split("iOS-")[-1].split("-")) if "iOS-" in k else (), reverse=True); print(next(x["udid"] for k in keys for x in groups[k] if "iPhone" in x["name"] and "SE" not in x["name"]))')
+          RUNTIME=$(xcrun simctl list runtimes -j | python3 -c 'import json,sys; print(next(x["identifier"] for x in json.load(sys.stdin)["runtimes"] if x["isAvailable"] and x["version"] == "18.5"))')
+          DEVICE=$(xcrun simctl create CloudFlow-Verification com.apple.CoreSimulator.SimDeviceType.iPhone-16 "$RUNTIME")
           echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
           diagnose_simulator() {
             STATUS=$?
@@ -47,7 +53,6 @@ jobs:
             return "$STATUS"
           }
           trap diagnose_simulator EXIT
-          open -a Simulator
           xcrun simctl boot "$DEVICE"
           xcrun simctl bootstatus "$DEVICE" -b
           sleep 10
@@ -83,6 +88,7 @@ jobs:
             xcrun simctl terminate "$DEVICE" app.cloudflow.personal
           done
       - name: Verify common phone interactions
+        timeout-minutes: 8
         run: |
           set -o pipefail
           xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE" -parallel-testing-enabled NO -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" -resultBundlePath "$RUNNER_TEMP/WorkspaceUI.xcresult" CODE_SIGNING_ALLOWED=NO test 2>&1 | tee "$RUNNER_TEMP/ui-tests.log"
