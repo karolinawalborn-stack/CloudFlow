@@ -30,6 +30,8 @@ import UIKit
     @Published var rewriting = false
     @Published private(set) var batchTotal = 0
     @Published private(set) var batchDone = 0
+    @Published private(set) var publicationReady = 0
+    @Published private(set) var publicationPending = 0
     /// Incremented after each successful AI rewrite so the UI can react.
     @Published private(set) var rewriteCount = 0
     private var backgroundID = UIBackgroundTaskIdentifier.invalid
@@ -57,9 +59,30 @@ import UIKit
         refreshAccounts(); refreshPublication()
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--verify-workspace") { verifyWorkspace() }
+        #if targetEnvironment(simulator)
+        if ProcessInfo.processInfo.arguments.contains("--preview-fixtures") { loadPreviewFixtures() }
+        #endif
         #endif
     }
     #if DEBUG
+    #if targetEnvironment(simulator)
+    private func loadPreviewFixtures() {
+        let sample = "旅行素材合集\nhttps://pan.quark.cn/s/previewQuark\nhttps://pan.xunlei.com/s/previewXunlei?pwd=abcd\nhttps://pan.baidu.com/s/1previewBaidu?pwd=efgh"
+        source = sample; original = sample
+        jobs = ShareText.parse(sample)
+        for i in jobs.indices {
+            if jobs[i].disk == .quark {
+                jobs[i].status = .done
+                jobs[i].result = TransferResult(shareURL: "https://pan.quark.cn/s/previewOwned", code: "", title: "旅行素材合集")
+            } else if jobs[i].disk == .baidu {
+                jobs[i].status = .failed
+                jobs[i].error = "登录状态已过期，请在账号设置中重新登录并验证。"
+            }
+        }
+        notice = "界面预览数据 · 未发起任何网盘请求"
+        refreshPublication()
+    }
+    #endif
     private func verifyWorkspace() {
         let text = "https://pan.baidu.com/s/1fixtureA?pwd=igfg\nhttps://pan.quark.cn/s/fixtureA\nhttps://pan.xunlei.com/s/fixtureA?pwd=jqnr#\nhttps://pan.baidu.com/s/1fixtureB?pwd=gj39\nhttps://pan.quark.cn/s/fixtureB\nhttps://pan.xunlei.com/s/fixtureB?pwd=7ehq#"
         jobs = ShareText.parse(text)
@@ -69,6 +92,8 @@ import UIKit
         precondition(importedJobs.count == 6, "Completed quark remains visible")
         precondition(output.contains("my-new-share"), "Share completion automatically replaces URL")
         precondition(selected.count == 5, "Completed task excluded from next batch")
+        precondition(publicationReady == 1 && publicationPending == 5, "Publication readiness reflects incomplete transfers")
+        precondition(WorkspaceInsights.successfulLinks(importedJobs).contains("my-new-share"), "Copy bundle includes owned successful links")
         draft = "新文案 " + text
         precondition(output.hasPrefix("新文案 ") && output.contains("my-new-share"), "Editing draft automatically updates publication")
         let other = ShareText.parse("https://pan.baidu.com/s/old-history")[0]
@@ -207,9 +232,10 @@ import UIKit
         let text = draft.isEmpty ? original : draft
         let result = ShareText.rewriteLinks(text, using: jobs)
         if output != result.text { output = result.text }
-        let pending = ShareText.parse(text).filter { link in
-            !jobs.contains { $0.status == .done && ShareText.identity($0.originalURL) == ShareText.identity(link.originalURL) }
-        }.count
+        let counts = WorkspaceInsights.publication(text, jobs: jobs)
+        if publicationReady != counts.ready { publicationReady = counts.ready }
+        if publicationPending != counts.pending { publicationPending = counts.pending }
+        let pending = counts.pending
         let message = "已自动替换 \(result.count) 处分享链接。" + (pending > 0 ? "还有 \(pending) 条未成功，暂保留原链接。" : "")
         if copyNotice != message { copyNotice = message }
         schedulePersist()

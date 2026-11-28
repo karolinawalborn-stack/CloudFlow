@@ -286,17 +286,25 @@ struct FlowEditor: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             if text.isEmpty {
-                Text(prompt).font(.system(size: 15)).foregroundStyle(FlowStyle.muted.opacity(0.75))
+                Text(prompt).font(.body).foregroundStyle(FlowStyle.muted.opacity(0.85))
                     .padding(.horizontal, 14).padding(.top, 17).allowsHitTesting(false)
             }
             TextEditor(text: $text)
                 .focused($focused)
-                .font(.system(size: 15))
+                .font(.body)
                 .lineSpacing(5)
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .frame(minHeight: height)
                 .accessibilityLabel(title)
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        if focused {
+                            Spacer()
+                            Button("完成") { focused = false }
+                        }
+                    }
+                }
         }
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(FlowStyle.field.opacity(0.92)))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(focused ? AnyShapeStyle(FlowStyle.accentGradient) : AnyShapeStyle(FlowStyle.border), lineWidth: focused ? 1.3 : 1))
@@ -357,7 +365,7 @@ struct FlowSegmented: View {
                         }
                     }
                     .foregroundStyle(selected ? FlowStyle.text : FlowStyle.muted)
-                    .frame(maxWidth: .infinity, minHeight: 38)
+                    .frame(maxWidth: .infinity, minHeight: 44)
                     .background {
                         if selected {
                             RoundedRectangle(cornerRadius: 11, style: .continuous)

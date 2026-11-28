@@ -15,7 +15,25 @@ targets:
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         PRODUCT_BUNDLE_IDENTIFIER: app.cloudflow.personal
-        MARKETING_VERSION: 0.4.0
-        CURRENT_PROJECT_VERSION: 5
+        MARKETING_VERSION: 0.4.1
+        CURRENT_PROJECT_VERSION: 6
         SWIFT_VERSION: '5.0'
         TARGETED_DEVICE_FAMILY: '1,2'
+  CloudFlowUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: CloudFlow
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: app.cloudflow.personal.uitests
+        SWIFT_VERSION: '5.0'
+schemes:
+  CloudFlow:
+    build:
+      targets:
+        CloudFlow: all
+    test:
+      targets: [CloudFlowUITests]
