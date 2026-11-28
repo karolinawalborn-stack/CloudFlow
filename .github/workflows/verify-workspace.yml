@@ -37,7 +37,16 @@ jobs:
         run: |
           DEVICE=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; groups=json.load(sys.stdin)["devices"]; keys=sorted(groups, key=lambda k: tuple(int(x) for x in k.split("iOS-")[-1].split("-")) if "iOS-" in k else (), reverse=True); print(next(x["udid"] for k in keys for x in groups[k] if "iPhone" in x["name"] and "SE" not in x["name"]))')
           echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
-          trap 'if [ $? -ne 0 ]; then xcrun simctl spawn "$DEVICE" log show --last 4m --style compact --predicate '''process == "CloudFlow" OR process == "SpringBoard"''' > "$RUNNER_TEMP/simulator-runtime.log"; find "$HOME/Library/Logs/DiagnosticReports" -name '''CloudFlow*''' -type f -exec cat {} \; >> "$RUNNER_TEMP/simulator-runtime.log"; tail -100 "$RUNNER_TEMP/simulator-runtime.log"; fi' EXIT
+          diagnose_simulator() {
+            STATUS=$?
+            if [ "$STATUS" -ne 0 ]; then
+              xcrun simctl spawn "$DEVICE" log show --last 4m --style compact --predicate 'process == "CloudFlow" OR process == "SpringBoard"' > "$RUNNER_TEMP/simulator-runtime.log" || true
+              find "$HOME/Library/Logs/DiagnosticReports" -name 'CloudFlow*' -type f -exec cat {} \; >> "$RUNNER_TEMP/simulator-runtime.log" || true
+              tail -100 "$RUNNER_TEMP/simulator-runtime.log"
+            fi
+            return "$STATUS"
+          }
+          trap diagnose_simulator EXIT
           open -a Simulator
           xcrun simctl boot "$DEVICE"
           xcrun simctl bootstatus "$DEVICE" -b
