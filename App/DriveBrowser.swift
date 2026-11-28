@@ -11,9 +11,14 @@ import WebKit
     let disk: Disk
     let webView: WKWebView
     private var observedHeaders: [String: String] = [:]
+    private let requestedURL: URL?
+    private var completingQuarkLogin = false
+    // Official Quark web client 532. The landing page redirects iPhones to a download ad.
+    private static let quarkLoginURL = URL(string: "https://uop.quark.cn/cas/custom/login?custom_login_type=mobile&client_id=532&display=pc")!
     private var progressObservation: NSKeyValueObservation?
     init(_ disk: Disk, url: URL? = nil) {
         self.disk = disk
+        requestedURL = url
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.defaultWebpagePreferences.preferredContentMode = .mobile
@@ -26,6 +31,12 @@ import WebKit
             controller.add(WeakLoginHandler(self), name: "cloudflowSession")
             controller.addUserScript(WKUserScript(source: Self.sessionObserver, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
+        if disk == .quark {
+            let controller = configuration.userContentController
+            controller.add(WeakLoginHandler(self), name: "cloudflowQuarkLogin")
+            controller.addUserScript(WKUserScript(source: Self.quarkLoginCallback, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            if url != nil { webView.customUserAgent = Self.desktopUserAgent }
+        }
         webView.scrollView.bouncesZoom = true
         webView.scrollView.showsHorizontalScrollIndicator = true
         webView.scrollView.showsVerticalScrollIndicator = true
@@ -36,7 +47,7 @@ import WebKit
             let value = change.newValue ?? 0
             Task { @MainActor in owner.progress = value }
         }
-        webView.load(URLRequest(url: url ?? disk.homeURL))
+        webView.load(URLRequest(url: url ?? (disk == .quark ? Self.quarkLoginURL : disk.homeURL)))
     }
     private static let mobileLayout = #"""
     (() => {
@@ -51,11 +62,18 @@ import WebKit
       document.head.appendChild(style);
     })()
     """#
+    private static let desktopUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    func reload() {
+        if disk == .quark && (requestedURL == nil || webView.url?.host == "h5.sm.cn") {
+            completingQuarkLogin = false
+            webView.load(URLRequest(url: Self.quarkLoginURL))
+        } else { webView.reload() }
+    }
     func setDesktop(_ value: Bool) {
         desktopMode = value; zoom = 1; webView.pageZoom = 1
-        webView.customUserAgent = value ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15" : nil
+        webView.customUserAgent = value ? Self.desktopUserAgent : nil
         webView.configuration.defaultWebpagePreferences.preferredContentMode = value ? .desktop : .mobile
-        webView.reload()
+        reload()
     }
     func changeZoom(_ delta: Double) { zoom = min(2, max(0.3, zoom + delta)); webView.pageZoom = zoom }
     func fitScreen() {
@@ -66,7 +84,36 @@ import WebKit
             }
         }
     }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { if desktopMode { fitScreen() } }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        if desktopMode { fitScreen() }
+        if disk == .quark, webView.url?.host == "uop.quark.cn", webView.url?.path == "/cas/custom/login" {
+            let presentation = "document.body.style.backgroundColor = '#ffffff'; document.body.style.padding = '16px'; document.body.style.boxSizing = 'border-box';"
+            webView.evaluateJavaScript(presentation, completionHandler: nil)
+        }
+        if disk == .quark, completingQuarkLogin, webView.url?.host == "pan.quark.cn", webView.url?.path == "/account/info" {
+            completingQuarkLogin = false
+            Task {
+                let script = "(() => { try { const result = JSON.parse(document.body.innerText); return {success: result.success === true, message: String(result.msg || '')}; } catch (_) { return {success:false,message:''}; } })()"
+                let result = try? await webView.evaluateJavaScript(script) as? [String: Any]
+                notice = result?["success"] as? Bool == true ? "夸克网页登录完成，请点右上角保存并验证。" : "夸克会话未确认，请刷新登录页后重试。"
+            }
+        }
+    }
+    // Receive only the normal login-success message from Quark's own top-level
+    // form, then let WKWebView finish its official cookie-setting account request.
+    private static let quarkLoginCallback = #"""
+    (() => {
+      if (location.protocol !== 'https:' || location.hostname !== 'uop.quark.cn' || location.pathname !== '/cas/custom/login' || window.top !== window) return;
+      window.addEventListener('message', event => {
+        if (event.origin !== 'https://uop.quark.cn' || event.source !== window) return;
+        const value = event.data;
+        const ticket = typeof value === 'string' && value.length === 32 ? value :
+          value && typeof value === 'object' && !value.error && typeof value.st === 'string' ? value.st : '';
+        if (!ticket || ticket.length > 8192 || /[\r\n]/.test(ticket)) return;
+        window.webkit.messageHandlers.cloudflowQuarkLogin.postMessage({ st: ticket });
+      });
+    })()
+    """#
     // The login page owns the session. Observe only its requests to the drive API,
     // retain the known session headers in memory, and persist only on explicit Save.
     private static let sessionObserver = #"""
@@ -96,7 +143,22 @@ import WebKit
     """#
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         let host = message.frameInfo.securityOrigin.host
-        guard disk == .xunlei, message.frameInfo.isMainFrame,
+        if message.name == "cloudflowQuarkLogin" {
+            guard disk == .quark, !completingQuarkLogin, message.frameInfo.isMainFrame,
+                  message.frameInfo.securityOrigin.`protocol` == "https", host == "uop.quark.cn",
+                  message.frameInfo.request.url?.path == "/cas/custom/login",
+                  let fields = message.body as? [String: String], let ticket = fields["st"],
+                  !ticket.isEmpty, ticket.count <= 8192, !ticket.contains(where: { $0.isNewline }) else { return }
+            var url = URLComponents(string: "https://pan.quark.cn/account/info")!
+            url.queryItems = [URLQueryItem(name: "st", value: ticket)]
+            guard let destination = url.url else { return }
+            completingQuarkLogin = true
+            notice = "正在完成夸克网页登录…"
+            webView.customUserAgent = Self.desktopUserAgent
+            webView.load(URLRequest(url: destination))
+            return
+        }
+        guard message.name == "cloudflowSession", disk == .xunlei, message.frameInfo.isMainFrame,
               host == "xunlei.com" || host.hasSuffix(".xunlei.com"),
               let fields = message.body as? [String: String] else { return }
         for key in ["authorization", "x-client-id", "x-device-id", "x-captcha-token"] {
@@ -106,6 +168,13 @@ import WebKit
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { notice = "页面加载失败，请刷新重试。" }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url, ["https", "about"].contains(url.scheme ?? "") else { decisionHandler(.cancel); return }
+        if disk == .quark, action.targetFrame?.isMainFrame == true, url.host == "h5.sm.cn", url.path.hasPrefix("/blm/mobile-entry-") {
+            decisionHandler(.cancel)
+            notice = "已切回夸克网页登录，请在此完成登录。"
+            completingQuarkLogin = false
+            webView.load(URLRequest(url: Self.quarkLoginURL))
+            return
+        }
         decisionHandler(.allow)
     }
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
@@ -197,7 +266,7 @@ struct DriveLogin: View {
                         Text(session.notice).font(.caption).foregroundStyle(FlowStyle.text.opacity(0.86))
                             .frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
                         if session.busy { ProgressView().tint(FlowStyle.accent) }
-                        Button { Haptics.tap(); session.webView.reload() } label: { Image(systemName: "arrow.clockwise").font(.subheadline.weight(.semibold)).frame(width: 44, height: 44) }
+                        Button { Haptics.tap(); session.reload() } label: { Image(systemName: "arrow.clockwise").font(.subheadline.weight(.semibold)).frame(width: 44, height: 44) }
                             .accessibilityLabel("刷新登录页")
                     }
                     HStack(spacing: 8) {

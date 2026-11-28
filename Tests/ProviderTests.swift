@@ -123,13 +123,22 @@ final class FixtureProtocol: URLProtocol {
         let initHTML = #"window.yunData={uk:'0',share_uk:"456",shareid:"123"};"#
         check(BaiduSharePage.decode(initHTML).shareID == "123", "Parse unquoted fields on extraction-code page")
         var verifiedCode = ""; var transferredIDs = ""; var sentKey = ""; var listed = false
+        let protectedDriver = driver(.baidu)
+        // Stale account cookies must be replaced by this share's encoded value.
+        let stale = HTTPCookie(properties: [.domain: ".baidu.com", .path: "/", .name: "BDCLND", .value: "stale", .secure: "TRUE"])!
+        protectedDriver.http.storage.setCookie(stale)
+        var checkedEncodedCookie = false
         FixtureProtocol.rawHandler = { request in
             let path = request.url!.path
             var result: [String: Any] = ["errno": 0]
             switch path {
             case "/api/gettemplatevariable": result["result"] = ["bdstoken": "token"]
             case "/share/verify": verifiedCode = formBody(request)["pwd"] ?? ""; result["randsk"] = "key%2Bprotected%3D"
-            case "/s/1fixture": return Data(html.utf8)
+            case "/s/1fixture":
+                let values = (protectedDriver.http.storage.cookies(for: request.url!) ?? []).filter { $0.name == "BDCLND" }.map(\.value)
+                check(values == ["key%2Bprotected%3D"], "BDCLND keeps encoded randsk and removes stale cookies")
+                checkedEncodedCookie = true
+                return Data(html.utf8)
             case "/share/list": listed = true
             case "/api/create": result["errno"] = 4
             case "/share/transfer":
@@ -143,7 +152,8 @@ final class FixtureProtocol: URLProtocol {
             return try JSONSerialization.data(withJSONObject: result)
         }
         let protectedBaidu = ShareText.parse("https://pan.baidu.com/s/1fixture?pwd=igfg")[0]
-        _ = try await driver(.baidu).transfer(protectedBaidu) { _ in }
+        _ = try await protectedDriver.transfer(protectedBaidu) { _ in }
+        check(checkedEncodedCookie, "The Baidu share page is fetched with its verified cookie")
         check(verifiedCode == "igfg", "Preserve original four-character extraction code")
         check(transferredIDs == "[101,102]", "Transfer every top-level file")
         check(sentKey == "key+protected=", "Pass once-decoded sekey through form encoding")

@@ -1,0 +1,37 @@
+name: Verify Baidu and Quark fixes
+on:
+  push:
+    branches: ['fix/baidu-cookie-quark-login-20261128']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Quark login callback regression
+        run: node Tests/QuarkLoginTests.js
+      - name: Link regression
+        run: |
+          swiftc App/Domain.swift Tests/DomainTests.swift -o "$RUNNER_TEMP/domain-tests"
+          "$RUNNER_TEMP/domain-tests"
+      - name: Provider regression with encoded Baidu cookies
+        run: |
+          swiftc App/Domain.swift App/Services.swift App/DriveAccount.swift App/DriveHTTP.swift App/DirectDrive.swift App/XunleiWebClient.swift App/BaiduSharePage.swift Tests/ProviderTests.swift -o "$RUNNER_TEMP/provider-tests"
+          "$RUNNER_TEMP/provider-tests"
+      - name: Install XcodeGen
+        run: brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Compile iOS 16 application without packaging
+        run: |
+          set -o pipefail
+          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/CloudFlowVerify" IPHONEOS_DEPLOYMENT_TARGET=16.0 SWIFT_VERSION=5.0 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee "$RUNNER_TEMP/verify-build.log"
+      - name: Upload compilation diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-verify-diagnostics
+          path: ${{ runner.temp }}/verify-build.log
+

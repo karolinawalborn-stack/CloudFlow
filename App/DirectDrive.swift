@@ -125,12 +125,17 @@ import Foundation
                 let verified = try await http.json("https://pan.baidu.com/share/verify", query: common.merging(["surl": id.hasPrefix("1") ? String(id.dropFirst()) : id]) { _, new in new }, form: ["pwd": job.code, "vcode": "", "vcode_str": ""], headers: ["Referer": job.originalURL])
                 let randsk = DriveJSON.string(verified, "randsk")
                 sekey = randsk.removingPercentEncoding ?? randsk
-                if !sekey.isEmpty {
+                if !randsk.isEmpty {
+                    // BDCLND uses the percent-encoded verification response verbatim.
+                    // Only the separate sekey request parameter is decoded once.
                     for old in http.storage.cookies(for: Disk.baidu.homeURL) ?? [] where old.name == "BDCLND" { http.storage.deleteCookie(old) }
-                    if let cookie = HTTPCookie(properties: [.domain: "pan.baidu.com", .path: "/", .name: "BDCLND", .value: sekey, .secure: "TRUE"]) { http.storage.setCookie(cookie) }
+                    if let cookie = HTTPCookie(properties: [.domain: ".pan.baidu.com", .path: "/", .name: "BDCLND", .value: randsk, .secure: "TRUE"]) { http.storage.setCookie(cookie) }
                 }
             }
-            if sekey.isEmpty { sekey = (http.storage.cookies(for: Disk.baidu.homeURL) ?? []).first { $0.name == "BDCLND" }?.value ?? "" }
+            if sekey.isEmpty {
+                let encoded = (http.storage.cookies(for: Disk.baidu.homeURL) ?? []).first { $0.name == "BDCLND" }?.value ?? ""
+                sekey = encoded.removingPercentEncoding ?? encoded
+            }
             let raw = try await http.raw("https://pan.baidu.com/s/" + id, query: job.code.isEmpty ? [:] : ["pwd": job.code], headers: ["Referer": job.originalURL])
             let html = String(decoding: raw, as: UTF8.self)
             let pageData = BaiduSharePage.decode(html)
