@@ -36,7 +36,9 @@ jobs:
           xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$RUNNER_TEMP/CloudFlowVerify" IPHONEOS_DEPLOYMENT_TARGET=16.0 SWIFT_VERSION=5.0 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build 2>&1 | tee "$RUNNER_TEMP/verify-build.log"
       - name: Build simulator app
         run: |
-          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/simulator-build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/simulator-build.log"; exit 1; }
+          # WebKit bug 293831 affects the iOS 18.5 simulator below deployment 18.4.
+          # This override is simulator-only; Release above explicitly compiles for iOS 16.
+          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" IPHONEOS_DEPLOYMENT_TARGET=18.4 CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/simulator-build.log" 2>&1 || { tail -80 "$RUNNER_TEMP/simulator-build.log"; exit 1; }
       - name: Simulator self-check and screenshots
         timeout-minutes: 7
         run: |
@@ -91,7 +93,7 @@ jobs:
         timeout-minutes: 8
         run: |
           set -o pipefail
-          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE" -parallel-testing-enabled NO -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" -resultBundlePath "$RUNNER_TEMP/WorkspaceUI.xcresult" CODE_SIGNING_ALLOWED=NO test 2>&1 | tee "$RUNNER_TEMP/ui-tests.log"
+          xcodebuild -project CloudFlow.xcodeproj -scheme CloudFlow -configuration Debug -destination "platform=iOS Simulator,id=$DEVICE" -parallel-testing-enabled NO -derivedDataPath "$RUNNER_TEMP/CloudFlowSimulator" -resultBundlePath "$RUNNER_TEMP/WorkspaceUI.xcresult" IPHONEOS_DEPLOYMENT_TARGET=18.4 CODE_SIGNING_ALLOWED=NO test 2>&1 | tee "$RUNNER_TEMP/ui-tests.log"
       - name: Upload interface previews
         if: always()
         uses: actions/upload-artifact@v4
